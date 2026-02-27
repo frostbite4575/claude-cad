@@ -1,0 +1,44 @@
+<div class="header">Chat</div>
+<div class="messages" #messagesContainer>
+  @for (msg of messages; track msg.timestamp) {
+    @if (msg.role === 'user') {
+      <div class="message user">
+        <div class="bubble user-bubble">{{ msg.content }}</div>
+      </div>
+    } @else if (msg.role === 'assistant') {
+      <div class="message assistant">
+        <div class="bubble assistant-bubble" [innerHTML]="linkify(msg.content)"></div>
+      </div>
+    } @else if (msg.role === 'tool') {
+      <div class="message tool">
+        <span class="tool-icon">&#9881;</span>
+        <span class="tool-text">{{ msg.content }}</span>
+      </div>
+    }
+  }
+  @if (loading) {
+    <div class="message assistant">
+      <div class="bubble assistant-bubble loading-dots">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
+  }
+  @if (messages.length === 0 && !loading) {
+    <div class="empty-state">
+      <p>Describe what you want to build.</p>
+      <p class="hint">Try: "Make a box 4 inches wide, 3 tall, 1 deep"</p>
+    </div>
+  }
+</div>
+<div class="input-area">
+  <input
+    type="text"
+    placeholder="Ask Claude..."
+    [(ngModel)]="inputText"
+    (keydown)="onKeydown($event)"
+    [disabled]="loading"
+  />
+  <button class="send-btn" (click)="send()" [disabled]="loading || !inputText.trim()">
+    &#9654;
+  </button>
+</div>
