@@ -12,7 +12,17 @@ Key rules:
 - Use the provided tools to create and manipulate 3D geometry.
 - After creating or modifying geometry, briefly confirm what you did.
 - When the user asks about the scene, use get_scene_info to check.
-- Be concise and practical — this is a shop-floor tool.`;
+- Be concise and practical — this is a shop-floor tool.
+
+2D Sketch workflow:
+- Use sketch_rectangle, sketch_circle, sketch_line, sketch_arc to draw 2D profiles on the XY plane.
+- Sketches appear as cyan outlines in the viewport.
+- Closed sketches (rectangle, circle) can be extruded into 3D solids with the extrude tool.
+- Open sketches (line, arc) cannot be extruded.
+- For flat plasma-cut parts: draw a sketch and export DXF directly — no need to extrude.
+- For 3D parts: draw a sketch, then extrude it.
+- Boolean, fillet, and chamfer operations only work on 3D solids, not sketches.
+- When the user says "draw" or asks for a 2D shape, prefer sketch tools. When they say "create" a 3D shape or specify depth/thickness, use create_box/create_cylinder or sketch + extrude.`;
 
 const MODEL = 'claude-opus-4-20250514';
 const MAX_TOKENS = 4096;
@@ -32,7 +42,7 @@ export async function handleChatMessage(
   const sceneInfo = state.getSceneInfo();
   const sceneContext = sceneInfo.length === 0
     ? '\n\n[Scene is currently empty]'
-    : `\n\n[Current scene: ${sceneInfo.map((e) => `${e.id} "${e.name}" (${e.type})`).join(', ')}]`;
+    : `\n\n[Current scene: ${sceneInfo.map((e) => `${e.id} "${e.name}" (${e.type}, ${e.entityKind})`).join(', ')}]`;
 
   conversationHistory.push({
     role: 'user',

@@ -98,7 +98,10 @@ export class DocumentState {
   tessellateAll(): TessellatedMesh[] {
     const meshes: TessellatedMesh[] = [];
     for (const entity of this.entities.values()) {
-      meshes.push(tessellate(this.oc, entity.shape));
+      const mesh = tessellate(this.oc, entity.shape);
+      mesh.entityId = entity.id;
+      mesh.entityKind = (entity.metadata.entityKind as 'sketch' | 'solid') || 'solid';
+      meshes.push(mesh);
     }
     return meshes;
   }
@@ -125,6 +128,7 @@ export class DocumentState {
         id: entity.id,
         name: entity.name,
         type: entity.type,
+        entityKind: (entity.metadata.entityKind as 'sketch' | 'solid') || 'solid',
         boundingBox,
       });
     }

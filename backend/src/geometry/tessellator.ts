@@ -98,6 +98,27 @@ export function tessellate(oc: OpenCascadeInstance, shape: any): TessellatedMesh
           edges.push(p1.X(), p1.Y(), p1.Z());
           edges.push(p2.X(), p2.Y(), p2.Z());
         }
+      } else {
+        // Fallback: sample the curve directly (needed for bare sketch edges/arcs)
+        try {
+          const adaptor = new oc.BRepAdaptor_Curve_2(edge);
+          const first = adaptor.FirstParameter();
+          const last = adaptor.LastParameter();
+          const segments = 32;
+          for (let i = 0; i < segments; i++) {
+            const u1 = first + (i / segments) * (last - first);
+            const u2 = first + ((i + 1) / segments) * (last - first);
+            const p1 = adaptor.Value(u1);
+            const p2 = adaptor.Value(u2);
+            edges.push(p1.X(), p1.Y(), p1.Z());
+            edges.push(p2.X(), p2.Y(), p2.Z());
+            p1.delete();
+            p2.delete();
+          }
+          adaptor.delete();
+        } catch {
+          // Curve sampling failed — skip this edge
+        }
       }
     } catch {
       // Polygon3D not available — frontend will use EdgesGeometry

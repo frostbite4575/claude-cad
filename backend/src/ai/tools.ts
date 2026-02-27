@@ -2,6 +2,7 @@ import type { Tool } from '@anthropic-ai/sdk/resources/messages.js';
 import type { DocumentState } from '../state/document-state.js';
 import { getOC } from '../geometry/oc-init.js';
 import { createBox, createCylinder, createSphere, createPolygonExtrusion } from '../geometry/primitives.js';
+import { createSketchLine, createSketchRectangle, createSketchCircle, createSketchArc, extrudeShape } from '../geometry/sketches.js';
 import { booleanUnion, booleanSubtract, booleanIntersect } from '../geometry/booleans.js';
 import { translateShape, rotateShape } from '../geometry/transforms.js';
 import { exportDxf } from '../geometry/dxf-export.js';
@@ -200,6 +201,81 @@ export const cadTools: Tool[] = [
     },
   },
   {
+    name: 'sketch_line',
+    description: 'Draw a 2D line segment on the XY plane. Open geometry — cannot be extruded. Coordinates in inches.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        x1: { type: 'number', description: 'Start X in inches' },
+        y1: { type: 'number', description: 'Start Y in inches' },
+        x2: { type: 'number', description: 'End X in inches' },
+        y2: { type: 'number', description: 'End Y in inches' },
+        z: { type: 'number', description: 'Z plane (default 0)' },
+      },
+      required: ['x1', 'y1', 'x2', 'y2'],
+    },
+  },
+  {
+    name: 'sketch_rectangle',
+    description: 'Draw a 2D rectangle on the XY plane. Creates a closed face that can be extruded into a solid. (x, y) is the bottom-left corner. Dimensions in inches.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        x: { type: 'number', description: 'Corner X in inches' },
+        y: { type: 'number', description: 'Corner Y in inches' },
+        width: { type: 'number', description: 'Width (along X) in inches' },
+        height: { type: 'number', description: 'Height (along Y) in inches' },
+        z: { type: 'number', description: 'Z plane (default 0)' },
+      },
+      required: ['x', 'y', 'width', 'height'],
+    },
+  },
+  {
+    name: 'sketch_circle',
+    description: 'Draw a 2D circle on the XY plane. Creates a closed face that can be extruded into a solid. Dimensions in inches.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        center_x: { type: 'number', description: 'Center X in inches' },
+        center_y: { type: 'number', description: 'Center Y in inches' },
+        radius: { type: 'number', description: 'Radius in inches' },
+        z: { type: 'number', description: 'Z plane (default 0)' },
+      },
+      required: ['center_x', 'center_y', 'radius'],
+    },
+  },
+  {
+    name: 'sketch_arc',
+    description: 'Draw a 2D arc on the XY plane. Open geometry — cannot be extruded. Angles in degrees, measured counter-clockwise from the +X axis.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        center_x: { type: 'number', description: 'Center X in inches' },
+        center_y: { type: 'number', description: 'Center Y in inches' },
+        radius: { type: 'number', description: 'Radius in inches' },
+        start_angle: { type: 'number', description: 'Start angle in degrees' },
+        end_angle: { type: 'number', description: 'End angle in degrees' },
+        z: { type: 'number', description: 'Z plane (default 0)' },
+      },
+      required: ['center_x', 'center_y', 'radius', 'start_angle', 'end_angle'],
+    },
+  },
+  {
+    name: 'extrude',
+    description: 'Extrude a 2D sketch face (rectangle or circle) into a 3D solid. Only works on closed sketch entities (not lines or arcs). The sketch is replaced by the resulting solid.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the sketch face to extrude' },
+        height: { type: 'number', description: 'Extrusion height in inches' },
+        direction_x: { type: 'number', description: 'X component of extrusion direction (default 0)' },
+        direction_y: { type: 'number', description: 'Y component of extrusion direction (default 0)' },
+        direction_z: { type: 'number', description: 'Z component of extrusion direction (default 1)' },
+      },
+      required: ['entity_id', 'height'],
+    },
+  },
+  {
     name: 'undo',
     description: 'Undo the last state-changing operation. Use when you made a mistake or the user asks to undo.',
     input_schema: {
@@ -293,6 +369,9 @@ export function executeTool(
         if (!e1 || !e2) {
           return JSON.stringify({ success: false, error: 'One or both entity IDs not found' });
         }
+        if (e1.metadata.entityKind === 'sketch' || e2.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Boolean operations require 3D solid entities. Extrude sketches first.' });
+        }
         const result = booleanUnion(oc, e1.shape, e2.shape);
         state.removeEntity(input.entity_id_1);
         state.removeEntity(input.entity_id_2);
@@ -310,6 +389,9 @@ export function executeTool(
         if (!e1 || !e2) {
           return JSON.stringify({ success: false, error: 'One or both entity IDs not found' });
         }
+        if (e1.metadata.entityKind === 'sketch' || e2.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Boolean operations require 3D solid entities. Extrude sketches first.' });
+        }
         const result = booleanSubtract(oc, e1.shape, e2.shape);
         state.removeEntity(input.entity_id_1);
         state.removeEntity(input.entity_id_2);
@@ -326,6 +408,9 @@ export function executeTool(
         const e2 = state.getEntity(input.entity_id_2);
         if (!e1 || !e2) {
           return JSON.stringify({ success: false, error: 'One or both entity IDs not found' });
+        }
+        if (e1.metadata.entityKind === 'sketch' || e2.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Boolean operations require 3D solid entities. Extrude sketches first.' });
         }
         const result = booleanIntersect(oc, e1.shape, e2.shape);
         state.removeEntity(input.entity_id_1);
@@ -393,6 +478,9 @@ export function executeTool(
         if (!e) {
           return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
         }
+        if (e.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Fillet requires a 3D solid entity. Extrude sketches first.' });
+        }
         const filletedShape = filletAllEdges(oc, e.shape, input.radius);
         state.replaceShape(input.entity_id, filletedShape);
         return JSON.stringify({
@@ -407,12 +495,101 @@ export function executeTool(
         if (!e) {
           return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
         }
+        if (e.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Chamfer requires a 3D solid entity. Extrude sketches first.' });
+        }
         const chamferedShape = chamferAllEdges(oc, e.shape, input.distance);
         state.replaceShape(input.entity_id, chamferedShape);
         return JSON.stringify({
           success: true,
           entity_id: input.entity_id,
           description: `Chamfered all edges of ${input.entity_id} with distance ${input.distance}"`,
+        });
+      }
+
+      case 'sketch_line': {
+        const shape = createSketchLine(oc, input.x1, input.y1, input.x2, input.y2, input.z ?? 0);
+        const entity = state.addEntity(
+          `Line (${input.x1},${input.y1})→(${input.x2},${input.y2})`,
+          'sketch_line',
+          shape,
+          { entityKind: 'sketch' }
+        );
+        return JSON.stringify({
+          success: true,
+          entity_id: entity.id,
+          description: `Created line from (${input.x1}, ${input.y1}) to (${input.x2}, ${input.y2}) as ${entity.id}. Open geometry — cannot be extruded.`,
+        });
+      }
+
+      case 'sketch_rectangle': {
+        const shape = createSketchRectangle(oc, input.x, input.y, input.width, input.height, input.z ?? 0);
+        const entity = state.addEntity(
+          `Rectangle ${input.width}×${input.height} at (${input.x},${input.y})`,
+          'sketch_rectangle',
+          shape,
+          { entityKind: 'sketch' }
+        );
+        return JSON.stringify({
+          success: true,
+          entity_id: entity.id,
+          description: `Created ${input.width}" × ${input.height}" rectangle at (${input.x}, ${input.y}) as ${entity.id}. Closed face — can be extruded.`,
+        });
+      }
+
+      case 'sketch_circle': {
+        const shape = createSketchCircle(oc, input.center_x, input.center_y, input.radius, input.z ?? 0);
+        const entity = state.addEntity(
+          `Circle r=${input.radius} at (${input.center_x},${input.center_y})`,
+          'sketch_circle',
+          shape,
+          { entityKind: 'sketch' }
+        );
+        return JSON.stringify({
+          success: true,
+          entity_id: entity.id,
+          description: `Created circle radius ${input.radius}" at (${input.center_x}, ${input.center_y}) as ${entity.id}. Closed face — can be extruded.`,
+        });
+      }
+
+      case 'sketch_arc': {
+        const shape = createSketchArc(oc, input.center_x, input.center_y, input.radius, input.start_angle, input.end_angle, input.z ?? 0);
+        const entity = state.addEntity(
+          `Arc r=${input.radius} ${input.start_angle}°–${input.end_angle}°`,
+          'sketch_arc',
+          shape,
+          { entityKind: 'sketch' }
+        );
+        return JSON.stringify({
+          success: true,
+          entity_id: entity.id,
+          description: `Created arc radius ${input.radius}" from ${input.start_angle}° to ${input.end_angle}° at (${input.center_x}, ${input.center_y}) as ${entity.id}. Open geometry — cannot be extruded.`,
+        });
+      }
+
+      case 'extrude': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (e.metadata.entityKind !== 'sketch') {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} is already a solid — extrude only works on sketch faces.` });
+        }
+        if (e.type === 'sketch_line' || e.type === 'sketch_arc') {
+          return JSON.stringify({ success: false, error: `Cannot extrude an open ${e.type}. Only closed sketches (rectangles, circles) can be extruded.` });
+        }
+        const dirX = input.direction_x ?? 0;
+        const dirY = input.direction_y ?? 0;
+        const dirZ = input.direction_z ?? 1;
+        const solid = extrudeShape(oc, e.shape, input.height, dirX, dirY, dirZ);
+        state.replaceShape(input.entity_id, solid);
+        e.name = `Extruded ${e.name} h=${input.height}`;
+        e.type = 'extrusion';
+        e.metadata.entityKind = 'solid';
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          description: `Extruded ${input.entity_id} by ${input.height}" → now a 3D solid.`,
         });
       }
 

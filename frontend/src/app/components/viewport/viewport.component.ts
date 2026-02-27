@@ -157,39 +157,75 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
-  private addMesh(data: { vertices: number[]; indices: number[]; normals: number[]; edges: number[] }) {
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.vertices, 3));
-    geometry.setIndex(data.indices);
+  private addMesh(data: {
+    vertices: number[];
+    indices: number[];
+    normals: number[];
+    edges: number[];
+    entityId?: string;
+    entityKind?: 'sketch' | 'solid';
+  }) {
+    const isSketch = data.entityKind === 'sketch';
 
-    if (data.normals.length > 0) {
-      geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3));
+    if (isSketch) {
+      // Sketch rendering: cyan lines + optional translucent fill
+      if (data.edges.length > 0) {
+        const edgeGeometry = new THREE.BufferGeometry();
+        edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.edges, 3));
+        const lineMaterial = new THREE.LineBasicMaterial({ color: 0x00e5ff, linewidth: 2 });
+        const lines = new THREE.LineSegments(edgeGeometry, lineMaterial);
+        this.meshGroup.add(lines);
+      }
+
+      // Optional translucent fill for closed sketches (faces with triangles)
+      if (data.vertices.length > 0 && data.indices.length > 0) {
+        const fillGeometry = new THREE.BufferGeometry();
+        fillGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.vertices, 3));
+        fillGeometry.setIndex(data.indices);
+        fillGeometry.computeVertexNormals();
+        const fillMaterial = new THREE.MeshBasicMaterial({
+          color: 0x00e5ff,
+          transparent: true,
+          opacity: 0.1,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+        });
+        const fillMesh = new THREE.Mesh(fillGeometry, fillMaterial);
+        this.meshGroup.add(fillMesh);
+      }
     } else {
-      geometry.computeVertexNormals();
+      // Solid rendering (existing behavior)
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(data.vertices, 3));
+      geometry.setIndex(data.indices);
+
+      if (data.normals.length > 0) {
+        geometry.setAttribute('normal', new THREE.Float32BufferAttribute(data.normals, 3));
+      } else {
+        geometry.computeVertexNormals();
+      }
+
+      const material = new THREE.MeshStandardMaterial({
+        color: 0x7090b0,
+        metalness: 0.3,
+        roughness: 0.6,
+        side: THREE.DoubleSide,
+      });
+      const mesh = new THREE.Mesh(geometry, material);
+      this.meshGroup.add(mesh);
+
+      // Edge lines
+      let edgeGeometry: THREE.BufferGeometry;
+      if (data.edges.length > 0) {
+        edgeGeometry = new THREE.BufferGeometry();
+        edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.edges, 3));
+      } else {
+        edgeGeometry = new THREE.EdgesGeometry(geometry, 15);
+      }
+
+      const lineMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
+      const lines = new THREE.LineSegments(edgeGeometry, lineMaterial);
+      this.meshGroup.add(lines);
     }
-
-    // Shaded mesh
-    const material = new THREE.MeshStandardMaterial({
-      color: 0x7090b0,
-      metalness: 0.3,
-      roughness: 0.6,
-      side: THREE.DoubleSide,
-    });
-    const mesh = new THREE.Mesh(geometry, material);
-    this.meshGroup.add(mesh);
-
-    // Edge lines
-    let edgeGeometry: THREE.BufferGeometry;
-    if (data.edges.length > 0) {
-      edgeGeometry = new THREE.BufferGeometry();
-      edgeGeometry.setAttribute('position', new THREE.Float32BufferAttribute(data.edges, 3));
-    } else {
-      // Fallback: derive edges from mesh geometry
-      edgeGeometry = new THREE.EdgesGeometry(geometry, 15);
-    }
-
-    const lineMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
-    const lines = new THREE.LineSegments(edgeGeometry, lineMaterial);
-    this.meshGroup.add(lines);
   }
 }

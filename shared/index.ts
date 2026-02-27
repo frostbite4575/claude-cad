@@ -3,6 +3,8 @@ export interface TessellatedMesh {
   indices: number[];
   normals: number[];
   edges: number[];
+  entityId?: string;
+  entityKind?: 'sketch' | 'solid';
 }
 
 export type WSMessageType =
@@ -52,6 +54,7 @@ export interface EntityInfo {
   id: string;
   name: string;
   type: string;
+  entityKind: 'sketch' | 'solid';
   boundingBox: {
     min: { x: number; y: number; z: number };
     max: { x: number; y: number; z: number };
