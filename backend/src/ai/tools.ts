@@ -4,7 +4,7 @@ import { getOC } from '../geometry/oc-init.js';
 import { createBox, createCylinder, createSphere, createPolygonExtrusion } from '../geometry/primitives.js';
 import { createSketchLine, createSketchRectangle, createSketchCircle, createSketchArc, extrudeShape } from '../geometry/sketches.js';
 import { booleanUnion, booleanSubtract, booleanIntersect } from '../geometry/booleans.js';
-import { translateShape, rotateShape } from '../geometry/transforms.js';
+import { translateShape, rotateShape, mirrorShape, linearPatternCopies, circularPatternCopies } from '../geometry/transforms.js';
 import { exportDxf } from '../geometry/dxf-export.js';
 import { exportStep } from '../geometry/step-export.js';
 import { filletAllEdges, chamferAllEdges } from '../geometry/fillets.js';
@@ -273,6 +273,53 @@ export const cadTools: Tool[] = [
         direction_z: { type: 'number', description: 'Z component of extrusion direction (default 1)' },
       },
       required: ['entity_id', 'height'],
+    },
+  },
+  {
+    name: 'mirror',
+    description: 'Mirror an entity across a plane, creating a new mirrored copy (original is kept). Works on both sketches and solids.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to mirror' },
+        plane: { type: 'string', enum: ['XY', 'XZ', 'YZ'], description: 'Mirror plane' },
+        plane_offset: { type: 'number', description: 'Offset of the mirror plane from origin in inches (default 0). E.g. plane=YZ, offset=3 mirrors across X=3.' },
+      },
+      required: ['entity_id', 'plane'],
+    },
+  },
+  {
+    name: 'linear_pattern',
+    description: 'Create N copies of an entity spaced along a direction. Original is kept. Works on both sketches and solids.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to pattern' },
+        count: { type: 'number', description: 'Number of copies to create' },
+        spacing_x: { type: 'number', description: 'Spacing in X per copy in inches' },
+        spacing_y: { type: 'number', description: 'Spacing in Y per copy in inches' },
+        spacing_z: { type: 'number', description: 'Spacing in Z per copy in inches (default 0)' },
+      },
+      required: ['entity_id', 'count', 'spacing_x', 'spacing_y'],
+    },
+  },
+  {
+    name: 'circular_pattern',
+    description: 'Create N copies of an entity arranged around an axis. Original is kept. Use for bolt hole circles, radial patterns. Works on both sketches and solids.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to pattern' },
+        count: { type: 'number', description: 'Number of copies to create' },
+        center_x: { type: 'number', description: 'Rotation center X (default 0)' },
+        center_y: { type: 'number', description: 'Rotation center Y (default 0)' },
+        center_z: { type: 'number', description: 'Rotation center Z (default 0)' },
+        axis_x: { type: 'number', description: 'Rotation axis X component (default 0)' },
+        axis_y: { type: 'number', description: 'Rotation axis Y component (default 0)' },
+        axis_z: { type: 'number', description: 'Rotation axis Z component (default 1)' },
+        full_angle: { type: 'number', description: 'Total angle in degrees to spread copies over (default 360)' },
+      },
+      required: ['entity_id', 'count'],
     },
   },
   {
@@ -659,6 +706,81 @@ export function executeTool(
           download_url: downloadUrl,
           warnings: result.warnings,
           description: `Exported ${label} to STEP. Download: ${downloadUrl}${result.warnings.length > 0 ? '. Warnings: ' + result.warnings.join('; ') : ''}`,
+        });
+      }
+
+      case 'mirror': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        const mirrored = mirrorShape(oc, e.shape, input.plane, input.plane_offset ?? 0);
+        const mirEntity = state.addEntity(
+          `Mirror of ${e.name} across ${input.plane}`,
+          e.type,
+          mirrored,
+          { entityKind: e.metadata.entityKind }
+        );
+        return JSON.stringify({
+          success: true,
+          entity_id: mirEntity.id,
+          description: `Mirrored ${input.entity_id} across ${input.plane} plane${input.plane_offset ? ` at offset ${input.plane_offset}"` : ''} → new entity ${mirEntity.id}`,
+        });
+      }
+
+      case 'linear_pattern': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        const sx = input.spacing_x;
+        const sy = input.spacing_y;
+        const sz = input.spacing_z ?? 0;
+        const copies = linearPatternCopies(oc, e.shape, input.count, sx, sy, sz);
+        const newIds: string[] = [];
+        for (let i = 0; i < copies.length; i++) {
+          const copyEntity = state.addEntity(
+            `${e.name} pattern copy ${i + 1}`,
+            e.type,
+            copies[i],
+            { entityKind: e.metadata.entityKind }
+          );
+          newIds.push(copyEntity.id);
+        }
+        return JSON.stringify({
+          success: true,
+          entity_ids: newIds,
+          description: `Created ${input.count} linear copies of ${input.entity_id} spaced (${sx}, ${sy}, ${sz})": ${newIds.join(', ')}`,
+        });
+      }
+
+      case 'circular_pattern': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        const cx = input.center_x ?? 0;
+        const cy = input.center_y ?? 0;
+        const cz = input.center_z ?? 0;
+        const ax = input.axis_x ?? 0;
+        const ay = input.axis_y ?? 0;
+        const az = input.axis_z ?? 1;
+        const fullAngle = input.full_angle ?? 360;
+        const copies = circularPatternCopies(oc, e.shape, input.count, cx, cy, cz, ax, ay, az, fullAngle);
+        const newIds: string[] = [];
+        for (let i = 0; i < copies.length; i++) {
+          const copyEntity = state.addEntity(
+            `${e.name} radial copy ${i + 1}`,
+            e.type,
+            copies[i],
+            { entityKind: e.metadata.entityKind }
+          );
+          newIds.push(copyEntity.id);
+        }
+        return JSON.stringify({
+          success: true,
+          entity_ids: newIds,
+          description: `Created ${input.count} circular copies of ${input.entity_id} around (${cx},${cy},${cz}) over ${fullAngle}°: ${newIds.join(', ')}`,
         });
       }
 

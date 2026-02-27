@@ -22,7 +22,12 @@ Key rules:
 - For flat plasma-cut parts: draw a sketch and export DXF directly — no need to extrude.
 - For 3D parts: draw a sketch, then extrude it.
 - Boolean, fillet, and chamfer operations only work on 3D solids, not sketches.
-- When the user says "draw" or asks for a 2D shape, prefer sketch tools. When they say "create" a 3D shape or specify depth/thickness, use create_box/create_cylinder or sketch + extrude.`;
+- When the user says "draw" or asks for a 2D shape, prefer sketch tools. When they say "create" a 3D shape or specify depth/thickness, use create_box/create_cylinder or sketch + extrude.
+
+Mirror & Pattern tools:
+- Use mirror to reflect geometry across XY, XZ, or YZ planes. The original is kept; a new mirrored copy is created. Use plane_offset to mirror across a shifted plane (e.g. mirror across X=3 → plane=YZ, offset=3).
+- Use linear_pattern for rows of repeated features (e.g. evenly spaced holes, mounting slots).
+- Use circular_pattern for bolt hole circles and radial patterns. Default: copies around Z axis at origin over 360°.`;
 
 const MODEL = 'claude-opus-4-20250514';
 const MAX_TOKENS = 4096;
