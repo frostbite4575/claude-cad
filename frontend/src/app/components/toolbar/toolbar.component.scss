@@ -21,10 +21,16 @@
   font-size: 20px;
 }
 
+.separator {
+  width: 28px;
+  height: 1px;
+  background: #2a2a4a;
+}
+
 .toolbar-btn {
   width: 40px;
   height: 40px;
-  border: none;
+  border: 1px solid transparent;
   border-radius: 8px;
   background: transparent;
   color: #8888aa;
@@ -32,10 +38,16 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 
   &:hover {
     background: #2a2a4a;
     color: #ccccee;
+  }
+
+  &.active {
+    background: #2244aa;
+    border-color: #4488cc;
+    color: #ffffff;
   }
 }

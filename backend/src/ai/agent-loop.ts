@@ -27,7 +27,30 @@ Key rules:
 Mirror & Pattern tools:
 - Use mirror to reflect geometry across XY, XZ, or YZ planes. The original is kept; a new mirrored copy is created. Use plane_offset to mirror across a shifted plane (e.g. mirror across X=3 → plane=YZ, offset=3).
 - Use linear_pattern for rows of repeated features (e.g. evenly spaced holes, mounting slots).
-- Use circular_pattern for bolt hole circles and radial patterns. Default: copies around Z axis at origin over 360°.`;
+- Use circular_pattern for bolt hole circles and radial patterns. Default: copies around Z axis at origin over 360°.
+
+Sheet metal workflow (flat-first):
+- Use create_sheet_metal_plate to start (specify material like "1/4 mild steel").
+- Use list_materials to see available materials.
+- Use add_bend_line to define fold locations. Position = distance from left (Y-axis) or bottom (X-axis) edge.
+- Use get_flat_pattern to verify bend calculations before export.
+- Use fold_sheet_metal to create a 3D preview (original flat plate is kept).
+- Export the flat plate entity with export_dxf for plasma cutting. Bend lines appear on a BEND layer.
+- For flat parts without bends, just create the plate and export directly.
+
+Cutout & hole tools:
+- Use cut_hole for circular holes (specify center and radius).
+- Use cut_slot for rectangular or obround cutouts (use corner_radius for rounded ends).
+- Use cut_pattern_linear for grids of holes (e.g. mounting patterns).
+- Use cut_pattern_circular for bolt hole circles.
+- All cutout tools auto-detect depth from the entity geometry. Works on any solid including sheet metal plates.
+- Cutting a sheet metal plate preserves its material and bend line metadata.
+- Prefer cutout tools over manual cylinder + translate + boolean_subtract for holes.
+
+Entity selection:
+- The user can click entities in the viewport to select them. The currently selected entity is shown in the scene context.
+- When the user says "this", "it", "the selected entity", or references a shape without specifying an ID, operate on the currently selected entity from the scene context.
+- If no entity is selected and the user's intent is ambiguous, ask them to click the entity or specify an ID.`;
 
 const MODEL = 'claude-opus-4-20250514';
 const MAX_TOKENS = 4096;
@@ -35,7 +58,7 @@ const MAX_TOKENS = 4096;
 const conversationHistory: MessageParam[] = [];
 
 // Tools that don't mutate state — no snapshot needed
-const READ_ONLY_TOOLS = new Set(['get_scene_info', 'export_dxf', 'export_step', 'undo', 'redo']);
+const READ_ONLY_TOOLS = new Set(['get_scene_info', 'export_dxf', 'export_step', 'undo', 'redo', 'get_flat_pattern', 'list_materials']);
 
 export async function handleChatMessage(
   userMessage: string,
@@ -45,9 +68,14 @@ export async function handleChatMessage(
 ): Promise<void> {
   // Append scene context to user message
   const sceneInfo = state.getSceneInfo();
+  const selectedId = state.getSelectedEntityId();
+  const selectedEntity = selectedId ? sceneInfo.find((e) => e.id === selectedId) : null;
+  const selectionNote = selectedEntity
+    ? `\n[Selected: ${selectedEntity.id} "${selectedEntity.name}" (${selectedEntity.type}, ${selectedEntity.entityKind})]`
+    : '';
   const sceneContext = sceneInfo.length === 0
     ? '\n\n[Scene is currently empty]'
-    : `\n\n[Current scene: ${sceneInfo.map((e) => `${e.id} "${e.name}" (${e.type}, ${e.entityKind})`).join(', ')}]`;
+    : `\n\n[Current scene: ${sceneInfo.map((e) => `${e.id} "${e.name}" (${e.type}, ${e.entityKind})`).join(', ')}]${selectionNote}`;
 
   conversationHistory.push({
     role: 'user',

@@ -1,1 +1,12 @@
 <canvas #canvas></canvas>
+<div class="entity-tooltip"
+     [class.visible]="tooltipVisible"
+     [style.left.px]="tooltipX"
+     [style.top.px]="tooltipY">
+  <div class="tooltip-name">{{ tooltipEntityName }}</div>
+  <div class="tooltip-type">{{ tooltipEntityType }}</div>
+  <div class="tooltip-dims">{{ tooltipDimensions }}</div>
+</div>
+<div class="coord-display" [class.visible]="drawingToolActive">
+  X: {{ coordX }} &nbsp; Y: {{ coordY }}
+</div>

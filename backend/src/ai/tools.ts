@@ -5,9 +5,12 @@ import { createBox, createCylinder, createSphere, createPolygonExtrusion } from 
 import { createSketchLine, createSketchRectangle, createSketchCircle, createSketchArc, extrudeShape } from '../geometry/sketches.js';
 import { booleanUnion, booleanSubtract, booleanIntersect } from '../geometry/booleans.js';
 import { translateShape, rotateShape, mirrorShape, linearPatternCopies, circularPatternCopies } from '../geometry/transforms.js';
-import { exportDxf } from '../geometry/dxf-export.js';
+import { exportDxf, buildBendLineDxfEntities } from '../geometry/dxf-export.js';
 import { exportStep } from '../geometry/step-export.js';
 import { filletAllEdges, chamferAllEdges } from '../geometry/fillets.js';
+import { MATERIALS_DB, findMaterial, calculateBend } from '../materials/materials.js';
+import type { BendLine } from '../materials/materials.js';
+import { createFlatPlate, buildFoldedShape } from '../geometry/sheet-metal.js';
 import type { UndoRedoManager } from '../state/undo-redo.js';
 
 export const cadTools: Tool[] = [
@@ -320,6 +323,135 @@ export const cadTools: Tool[] = [
         full_angle: { type: 'number', description: 'Total angle in degrees to spread copies over (default 360)' },
       },
       required: ['entity_id', 'count'],
+    },
+  },
+  {
+    name: 'create_sheet_metal_plate',
+    description: 'Create a flat sheet metal plate with a specific material. The plate lies on the XY plane with thickness in Z. Use list_materials to see available materials. All dimensions in inches.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        width: { type: 'number', description: 'Plate width (X) in inches' },
+        length: { type: 'number', description: 'Plate length (Y) in inches' },
+        material: { type: 'string', description: 'Material name, e.g. "1/4 mild steel". Use list_materials to see options.' },
+        thickness_override: { type: 'number', description: 'Optional custom thickness in inches. Overrides the material default.' },
+      },
+      required: ['width', 'length', 'material'],
+    },
+  },
+  {
+    name: 'add_bend_line',
+    description: 'Add a bend line to a sheet metal plate. Position is the distance from the left edge (for Y-axis bends) or bottom edge (for X-axis bends). Axis is the direction the bend line runs (X or Y). Angle is the bend angle in degrees.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the sheet metal plate' },
+        position: { type: 'number', description: 'Distance from edge in inches' },
+        axis: { type: 'string', enum: ['X', 'Y'], description: 'Axis the bend line runs along. X = horizontal bend (position measured from bottom), Y = vertical bend (position measured from left).' },
+        angle_deg: { type: 'number', description: 'Bend angle in degrees (e.g. 90)' },
+        direction: { type: 'string', enum: ['up', 'down'], description: 'Fold direction: up = toward +Z, down = toward -Z' },
+      },
+      required: ['entity_id', 'position', 'axis', 'angle_deg', 'direction'],
+    },
+  },
+  {
+    name: 'fold_sheet_metal',
+    description: 'Create a 3D folded preview of a sheet metal plate with bend lines. The original flat plate is preserved. Creates a new entity showing the folded shape.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the sheet metal plate to fold' },
+      },
+      required: ['entity_id'],
+    },
+  },
+  {
+    name: 'get_flat_pattern',
+    description: 'Get flat pattern information for a sheet metal plate: dimensions, material, bend lines, and bend calculations (allowance, deduction, setback).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the sheet metal plate' },
+      },
+      required: ['entity_id'],
+    },
+  },
+  {
+    name: 'list_materials',
+    description: 'List all available sheet metal materials with their thickness, bend radius, and K-factor.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'cut_hole',
+    description: 'Cut a circular hole in a solid entity. Specify center position and radius. Depth auto-detects from entity geometry (cuts all the way through). Works on any solid including sheet metal plates.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the solid to cut' },
+        center_x: { type: 'number', description: 'Hole center X position in inches' },
+        center_y: { type: 'number', description: 'Hole center Y position in inches' },
+        radius: { type: 'number', description: 'Hole radius in inches' },
+        depth: { type: 'number', description: 'Optional cut depth in inches. Defaults to entity thickness (cuts through).' },
+      },
+      required: ['entity_id', 'center_x', 'center_y', 'radius'],
+    },
+  },
+  {
+    name: 'cut_slot',
+    description: 'Cut a rectangular or obround slot in a solid entity. Specify center, width, height, and optional corner_radius for rounded ends (common for mounting slots). Depth auto-detects.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the solid to cut' },
+        center_x: { type: 'number', description: 'Slot center X position in inches' },
+        center_y: { type: 'number', description: 'Slot center Y position in inches' },
+        width: { type: 'number', description: 'Slot width (X) in inches' },
+        height: { type: 'number', description: 'Slot height (Y) in inches' },
+        corner_radius: { type: 'number', description: 'Optional corner radius for obround/stadium shape. Max = min(width,height)/2.' },
+        depth: { type: 'number', description: 'Optional cut depth in inches. Defaults to entity thickness (cuts through).' },
+      },
+      required: ['entity_id', 'center_x', 'center_y', 'width', 'height'],
+    },
+  },
+  {
+    name: 'cut_pattern_linear',
+    description: 'Cut a grid of circular holes in a solid entity. Specify starting position, counts, and spacing in X and Y. Single undo step for the entire pattern.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the solid to cut' },
+        hole_radius: { type: 'number', description: 'Radius of each hole in inches' },
+        start_x: { type: 'number', description: 'First hole center X position in inches' },
+        start_y: { type: 'number', description: 'First hole center Y position in inches' },
+        count_x: { type: 'number', description: 'Number of holes in X direction' },
+        count_y: { type: 'number', description: 'Number of holes in Y direction' },
+        spacing_x: { type: 'number', description: 'Spacing between holes in X direction in inches' },
+        spacing_y: { type: 'number', description: 'Spacing between holes in Y direction in inches' },
+        depth: { type: 'number', description: 'Optional cut depth in inches. Defaults to entity thickness (cuts through).' },
+      },
+      required: ['entity_id', 'hole_radius', 'start_x', 'start_y', 'count_x', 'count_y', 'spacing_x', 'spacing_y'],
+    },
+  },
+  {
+    name: 'cut_pattern_circular',
+    description: 'Cut circular holes arranged in a bolt hole circle pattern. Holes are evenly spaced around a center point. Single undo step.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the solid to cut' },
+        hole_radius: { type: 'number', description: 'Radius of each hole in inches' },
+        center_x: { type: 'number', description: 'Pattern center X position in inches' },
+        center_y: { type: 'number', description: 'Pattern center Y position in inches' },
+        pattern_radius: { type: 'number', description: 'Radius of the bolt hole circle in inches' },
+        count: { type: 'number', description: 'Number of holes around the circle' },
+        start_angle: { type: 'number', description: 'Starting angle in degrees (default 0, measured from +X axis)' },
+        depth: { type: 'number', description: 'Optional cut depth in inches. Defaults to entity thickness (cuts through).' },
+      },
+      required: ['entity_id', 'hole_radius', 'center_x', 'center_y', 'pattern_radius', 'count'],
     },
   },
   {
@@ -644,6 +776,7 @@ export function executeTool(
         const entityId = input.entity_id as string | undefined;
         let shapes: any[];
         let label: string;
+        let extraLayered: any[] | undefined;
 
         if (entityId) {
           const entity = state.getEntity(entityId);
@@ -652,6 +785,15 @@ export function executeTool(
           }
           shapes = [entity.shape];
           label = entityId;
+
+          // If sheet metal plate, add bend lines on BEND layer
+          if (entity.metadata.sheetMetal && (entity.metadata.bendLines as BendLine[])?.length > 0) {
+            extraLayered = buildBendLineDxfEntities(
+              entity.metadata.bendLines as BendLine[],
+              entity.metadata.plateWidth as number,
+              entity.metadata.plateLength as number
+            );
+          }
         } else {
           const allEntities = state.getAllEntities();
           if (allEntities.length === 0) {
@@ -659,19 +801,33 @@ export function executeTool(
           }
           shapes = allEntities.map((e) => e.shape);
           label = `${allEntities.length} entity(ies)`;
+
+          // Collect bend lines from all sheet metal entities
+          const bendLayered: any[] = [];
+          for (const e of allEntities) {
+            if (e.metadata.sheetMetal && (e.metadata.bendLines as BendLine[])?.length > 0) {
+              bendLayered.push(...buildBendLineDxfEntities(
+                e.metadata.bendLines as BendLine[],
+                e.metadata.plateWidth as number,
+                e.metadata.plateLength as number
+              ));
+            }
+          }
+          if (bendLayered.length > 0) extraLayered = bendLayered;
         }
 
-        const result = exportDxf(oc, shapes);
+        const result = exportDxf(oc, shapes, extraLayered);
         const downloadUrl = entityId
           ? `/api/export/dxf?entity_id=${encodeURIComponent(entityId)}`
           : '/api/export/dxf';
 
+        const bendNote = extraLayered?.length ? ` + ${extraLayered.length} bend line(s) on BEND layer` : '';
         return JSON.stringify({
           success: true,
           download_url: downloadUrl,
           entity_count: result.entityCount,
           warnings: result.warnings,
-          description: `Exported ${label} to DXF (${result.entityCount} entities: lines, arcs, circles). Download: ${downloadUrl}${result.warnings.length > 0 ? '. Warnings: ' + result.warnings.join('; ') : ''}`,
+          description: `Exported ${label} to DXF (${result.entityCount} entities: lines, arcs, circles${bendNote}). Download: ${downloadUrl}${result.warnings.length > 0 ? '. Warnings: ' + result.warnings.join('; ') : ''}`,
         });
       }
 
@@ -784,6 +940,187 @@ export function executeTool(
         });
       }
 
+      case 'create_sheet_metal_plate': {
+        const mat = findMaterial(input.material);
+        if (!mat) {
+          return JSON.stringify({ success: false, error: `Material "${input.material}" not found. Use list_materials to see available options.` });
+        }
+        const thickness = input.thickness_override ?? mat.thickness;
+        const shape = createFlatPlate(oc, input.width, input.length, thickness);
+        const entity = state.addEntity(
+          `Sheet metal plate ${input.width}×${input.length} (${mat.name})`,
+          'sheet_metal_plate',
+          shape,
+          {
+            entityKind: 'solid',
+            sheetMetal: true,
+            materialName: mat.name,
+            materialType: mat.material_type,
+            thickness,
+            innerBendRadius: mat.inner_bend_radius,
+            kFactor: mat.k_factor,
+            plateWidth: input.width,
+            plateLength: input.length,
+            bendLines: [],
+          }
+        );
+        return JSON.stringify({
+          success: true,
+          entity_id: entity.id,
+          description: `Created ${input.width}" × ${input.length}" sheet metal plate (${mat.name}, ${thickness}" thick) as ${entity.id}`,
+        });
+      }
+
+      case 'add_bend_line': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (!e.metadata.sheetMetal) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} is not a sheet metal plate. Use create_sheet_metal_plate first.` });
+        }
+
+        // Validate position is within plate bounds
+        const maxPos = (input.axis === 'X' ? e.metadata.plateLength : e.metadata.plateWidth) as number;
+        if (input.position <= 0 || input.position >= maxPos) {
+          return JSON.stringify({ success: false, error: `Bend position ${input.position}" is out of bounds. Must be between 0 and ${maxPos}" for ${input.axis}-axis bends.` });
+        }
+
+        const bendId = `bend_${(e.metadata.bendLines as BendLine[]).length + 1}`;
+        const newBend: BendLine = {
+          id: bendId,
+          position: input.position,
+          axis: input.axis,
+          angle_deg: input.angle_deg,
+          direction: input.direction,
+        };
+
+        // CRITICAL: create new array for undo compatibility (shallow snapshot)
+        const oldBends = e.metadata.bendLines as BendLine[];
+        e.metadata.bendLines = [...oldBends, newBend];
+
+        const calc = calculateBend(
+          e.metadata.thickness as number,
+          e.metadata.innerBendRadius as number,
+          e.metadata.kFactor as number,
+          input.angle_deg
+        );
+
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          bend_id: bendId,
+          bend_calculation: calc,
+          description: `Added ${input.angle_deg}° ${input.direction} bend at ${input.position}" along ${input.axis}-axis on ${input.entity_id}. BA=${calc.bend_allowance}", BD=${calc.bend_deduction}"`,
+        });
+      }
+
+      case 'fold_sheet_metal': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (!e.metadata.sheetMetal) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} is not a sheet metal plate.` });
+        }
+        const bends = e.metadata.bendLines as BendLine[];
+        if (bends.length === 0) {
+          return JSON.stringify({ success: false, error: 'No bend lines defined. Use add_bend_line first.' });
+        }
+
+        // V1: single-axis constraint
+        const axes = new Set(bends.map(b => b.axis));
+        if (axes.size > 1) {
+          return JSON.stringify({ success: false, error: 'V1 limitation: all bends must be on the same axis. Mixed X/Y bends are not yet supported.' });
+        }
+
+        const foldedShape = buildFoldedShape(
+          oc,
+          e.metadata.plateWidth as number,
+          e.metadata.plateLength as number,
+          e.metadata.thickness as number,
+          e.metadata.innerBendRadius as number,
+          e.metadata.kFactor as number,
+          bends
+        );
+
+        const foldedEntity = state.addEntity(
+          `Folded ${e.name}`,
+          'sheet_metal_folded',
+          foldedShape,
+          { entityKind: 'solid', sourcePlateId: input.entity_id }
+        );
+
+        return JSON.stringify({
+          success: true,
+          entity_id: foldedEntity.id,
+          source_plate_id: input.entity_id,
+          description: `Created folded 3D preview as ${foldedEntity.id} (${bends.length} bend(s)). Original flat plate ${input.entity_id} is preserved.`,
+        });
+      }
+
+      case 'get_flat_pattern': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (!e.metadata.sheetMetal) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} is not a sheet metal plate.` });
+        }
+
+        const bends = e.metadata.bendLines as BendLine[];
+        const bendDetails = bends.map(b => {
+          const calc = calculateBend(
+            e.metadata.thickness as number,
+            e.metadata.innerBendRadius as number,
+            e.metadata.kFactor as number,
+            b.angle_deg
+          );
+          return {
+            id: b.id,
+            position: b.position,
+            axis: b.axis,
+            angle_deg: b.angle_deg,
+            direction: b.direction,
+            ...calc,
+          };
+        });
+
+        const totalBA = bendDetails.reduce((sum, b) => sum + b.bend_allowance, 0);
+        const totalBD = bendDetails.reduce((sum, b) => sum + b.bend_deduction, 0);
+
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          material: e.metadata.materialName,
+          material_type: e.metadata.materialType,
+          thickness: e.metadata.thickness,
+          plate_width: e.metadata.plateWidth,
+          plate_length: e.metadata.plateLength,
+          bend_radius: e.metadata.innerBendRadius,
+          k_factor: e.metadata.kFactor,
+          bends: bendDetails,
+          total_bend_allowance: Math.round(totalBA * 10000) / 10000,
+          total_bend_deduction: Math.round(totalBD * 10000) / 10000,
+          description: `Flat pattern: ${e.metadata.plateWidth}" × ${e.metadata.plateLength}" ${e.metadata.materialName} (${e.metadata.thickness}" thick). ${bends.length} bend(s). Total BA=${totalBA.toFixed(4)}", Total BD=${totalBD.toFixed(4)}"`,
+        });
+      }
+
+      case 'list_materials': {
+        const table = MATERIALS_DB.map(m => ({
+          name: m.name,
+          type: m.material_type,
+          thickness: m.thickness,
+          bend_radius: m.inner_bend_radius,
+          k_factor: m.k_factor,
+        }));
+        return JSON.stringify({
+          success: true,
+          materials: table,
+          description: `Available materials: ${table.map(m => `${m.name} (${m.thickness}" thick)`).join(', ')}`,
+        });
+      }
+
       case 'undo': {
         if (!undoManager) {
           return JSON.stringify({ success: false, error: 'Undo not available' });
@@ -803,6 +1140,194 @@ export function executeTool(
         return JSON.stringify({
           success: result.success,
           description: result.description,
+        });
+      }
+
+      case 'cut_hole': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (e.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Cutout operations require a 3D solid entity. Extrude sketches first.' });
+        }
+
+        // Auto-detect depth from bounding box
+        const bbox = new oc.Bnd_Box_1();
+        oc.BRepBndLib.Add(e.shape, bbox, false);
+        const bMin = bbox.CornerMin();
+        const bMax = bbox.CornerMax();
+        const zMin = bMin.Z(), zMax = bMax.Z();
+        const autoDepth = input.depth ?? (zMax - zMin);
+        bMin.delete(); bMax.delete(); bbox.delete();
+
+        // Create cutter cylinder slightly oversized to avoid co-planar faces
+        const cutter = createCylinder(oc, input.radius, autoDepth + 0.01);
+        const positioned = translateShape(oc, cutter, input.center_x, input.center_y, zMax - autoDepth - 0.005);
+        cutter.delete();
+
+        const result = booleanSubtract(oc, e.shape, positioned);
+        positioned.delete();
+        state.replaceShape(input.entity_id, result);
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          description: `Cut ø${input.radius * 2}" hole at (${input.center_x}, ${input.center_y}) in ${input.entity_id}`,
+        });
+      }
+
+      case 'cut_slot': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (e.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Cutout operations require a 3D solid entity. Extrude sketches first.' });
+        }
+
+        // Auto-detect depth from bounding box
+        const bbox2 = new oc.Bnd_Box_1();
+        oc.BRepBndLib.Add(e.shape, bbox2, false);
+        const bMin2 = bbox2.CornerMin();
+        const bMax2 = bbox2.CornerMax();
+        const zMin2 = bMin2.Z(), zMax2 = bMax2.Z();
+        const autoDepth2 = input.depth ?? (zMax2 - zMin2);
+        bMin2.delete(); bMax2.delete(); bbox2.delete();
+
+        const cutDepth = autoDepth2 + 0.01;
+        let cutter2: any;
+
+        if (input.corner_radius && input.corner_radius > 0) {
+          // Obround: create box then fillet Z-parallel edges
+          const cr = Math.min(input.corner_radius, Math.min(input.width, input.height) / 2);
+          const rawBox = createBox(oc, input.width, input.height, cutDepth);
+          cutter2 = filletAllEdges(oc, rawBox, cr);
+          rawBox.delete();
+        } else {
+          cutter2 = createBox(oc, input.width, input.height, cutDepth);
+        }
+
+        // Position: center the slot at (center_x, center_y), top at zMax
+        const positioned2 = translateShape(
+          oc, cutter2,
+          input.center_x - input.width / 2,
+          input.center_y - input.height / 2,
+          zMax2 - autoDepth2 - 0.005
+        );
+        cutter2.delete();
+
+        const result2 = booleanSubtract(oc, e.shape, positioned2);
+        positioned2.delete();
+        state.replaceShape(input.entity_id, result2);
+
+        const shapeDesc = input.corner_radius ? `obround (r=${input.corner_radius}")` : 'rectangular';
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          description: `Cut ${input.width}" × ${input.height}" ${shapeDesc} slot at (${input.center_x}, ${input.center_y}) in ${input.entity_id}`,
+        });
+      }
+
+      case 'cut_pattern_linear': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (e.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Cutout operations require a 3D solid entity. Extrude sketches first.' });
+        }
+
+        // Auto-detect depth
+        const bbox3 = new oc.Bnd_Box_1();
+        oc.BRepBndLib.Add(e.shape, bbox3, false);
+        const bMin3 = bbox3.CornerMin();
+        const bMax3 = bbox3.CornerMax();
+        const zMin3 = bMin3.Z(), zMax3 = bMax3.Z();
+        const autoDepth3 = input.depth ?? (zMax3 - zMin3);
+        bMin3.delete(); bMax3.delete(); bbox3.delete();
+
+        const cutDepth3 = autoDepth3 + 0.01;
+        const zStart3 = zMax3 - autoDepth3 - 0.005;
+        const totalHoles = input.count_x * input.count_y;
+
+        // Create first cutter and fuse all into compound
+        let compound: any = null;
+        for (let iy = 0; iy < input.count_y; iy++) {
+          for (let ix = 0; ix < input.count_x; ix++) {
+            const cx = input.start_x + ix * input.spacing_x;
+            const cy = input.start_y + iy * input.spacing_y;
+            const cyl = createCylinder(oc, input.hole_radius, cutDepth3);
+            const pos = translateShape(oc, cyl, cx, cy, zStart3);
+            cyl.delete();
+            if (compound === null) {
+              compound = pos;
+            } else {
+              const fused = booleanUnion(oc, compound, pos);
+              compound.delete();
+              pos.delete();
+              compound = fused;
+            }
+          }
+        }
+
+        const result3 = booleanSubtract(oc, e.shape, compound);
+        compound.delete();
+        state.replaceShape(input.entity_id, result3);
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          description: `Cut ${input.count_x}×${input.count_y} grid (${totalHoles} holes, ø${input.hole_radius * 2}") starting at (${input.start_x}, ${input.start_y}) in ${input.entity_id}`,
+        });
+      }
+
+      case 'cut_pattern_circular': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (e.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Cutout operations require a 3D solid entity. Extrude sketches first.' });
+        }
+
+        // Auto-detect depth
+        const bbox4 = new oc.Bnd_Box_1();
+        oc.BRepBndLib.Add(e.shape, bbox4, false);
+        const bMin4 = bbox4.CornerMin();
+        const bMax4 = bbox4.CornerMax();
+        const zMin4 = bMin4.Z(), zMax4 = bMax4.Z();
+        const autoDepth4 = input.depth ?? (zMax4 - zMin4);
+        bMin4.delete(); bMax4.delete(); bbox4.delete();
+
+        const cutDepth4 = autoDepth4 + 0.01;
+        const zStart4 = zMax4 - autoDepth4 - 0.005;
+        const startAngle = (input.start_angle ?? 0) * Math.PI / 180;
+        const angleStep = (2 * Math.PI) / input.count;
+
+        let compound4: any = null;
+        for (let i = 0; i < input.count; i++) {
+          const angle = startAngle + i * angleStep;
+          const hx = input.center_x + input.pattern_radius * Math.cos(angle);
+          const hy = input.center_y + input.pattern_radius * Math.sin(angle);
+          const cyl = createCylinder(oc, input.hole_radius, cutDepth4);
+          const pos = translateShape(oc, cyl, hx, hy, zStart4);
+          cyl.delete();
+          if (compound4 === null) {
+            compound4 = pos;
+          } else {
+            const fused = booleanUnion(oc, compound4, pos);
+            compound4.delete();
+            pos.delete();
+            compound4 = fused;
+          }
+        }
+
+        const result4 = booleanSubtract(oc, e.shape, compound4);
+        compound4.delete();
+        state.replaceShape(input.entity_id, result4);
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          description: `Cut ${input.count}-hole bolt circle (ø${input.hole_radius * 2}" holes, ${input.pattern_radius}" radius) at (${input.center_x}, ${input.center_y}) in ${input.entity_id}`,
         });
       }
 

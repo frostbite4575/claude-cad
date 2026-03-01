@@ -1,5 +1,33 @@
 <div class="logo">C</div>
 
+<div class="separator"></div>
+
+<button class="toolbar-btn" title="Line (L)" [ngClass]="{ active: activeTool === 'line' }" (click)="setTool('line')">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <line x1="4" y1="16" x2="16" y2="4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  </svg>
+</button>
+
+<button class="toolbar-btn" title="Rectangle (R)" [ngClass]="{ active: activeTool === 'rectangle' }" (click)="setTool('rectangle')">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <rect x="3" y="5" width="14" height="10" rx="0.5" stroke="currentColor" stroke-width="1.5"/>
+  </svg>
+</button>
+
+<button class="toolbar-btn" title="Circle (C)" [ngClass]="{ active: activeTool === 'circle' }" (click)="setTool('circle')">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="10" cy="10" r="7" stroke="currentColor" stroke-width="1.5"/>
+  </svg>
+</button>
+
+<button class="toolbar-btn" title="Arc (A)" [ngClass]="{ active: activeTool === 'arc' }" (click)="setTool('arc')">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M4 14 A8 8 0 0 1 16 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+  </svg>
+</button>
+
+<div class="separator"></div>
+
 <button class="toolbar-btn" title="Export DXF" (click)="exportDxf()">
   <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path d="M10 3v10M10 13l-3.5-3.5M10 13l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>

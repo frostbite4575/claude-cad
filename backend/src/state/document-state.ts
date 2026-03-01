@@ -15,9 +15,22 @@ export class DocumentState {
   private entities = new Map<string, Entity>();
   private nextId = 1;
   private oc: OpenCascadeInstance;
+  private selectedEntityId: string | null = null;
 
   constructor(oc: OpenCascadeInstance) {
     this.oc = oc;
+  }
+
+  getSelectedEntityId(): string | null {
+    return this.selectedEntityId;
+  }
+
+  setSelectedEntityId(id: string | null): void {
+    if (id === null || this.entities.has(id)) {
+      this.selectedEntityId = id;
+    } else {
+      this.selectedEntityId = null;
+    }
   }
 
   addEntity(name: string, type: string, shape: any, metadata: Record<string, unknown> = {}): Entity {
@@ -101,6 +114,8 @@ export class DocumentState {
       const mesh = tessellate(this.oc, entity.shape);
       mesh.entityId = entity.id;
       mesh.entityKind = (entity.metadata.entityKind as 'sketch' | 'solid') || 'solid';
+      mesh.name = entity.name;
+      mesh.entityType = entity.type;
       meshes.push(mesh);
     }
     return meshes;

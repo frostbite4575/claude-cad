@@ -5,6 +5,8 @@ export interface TessellatedMesh {
   edges: number[];
   entityId?: string;
   entityKind?: 'sketch' | 'solid';
+  name?: string;
+  entityType?: string;
 }
 
 export type WSMessageType =
@@ -16,7 +18,9 @@ export type WSMessageType =
   | 'chat_tool_use'
   | 'scene_info'
   | 'undo'
-  | 'redo';
+  | 'redo'
+  | 'entity_selected'
+  | 'tool_execute';
 
 export interface WSMessage {
   type: WSMessageType;
@@ -46,6 +50,15 @@ export interface ChatResponsePayload {
 }
 
 export interface ChatToolUsePayload {
+  tool: string;
+  input: Record<string, unknown>;
+}
+
+export interface EntitySelectedPayload {
+  entityId: string | null;
+}
+
+export interface ToolExecutePayload {
   tool: string;
   input: Record<string, unknown>;
 }

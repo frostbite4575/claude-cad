@@ -9,7 +9,8 @@ import { UndoRedoManager } from './state/undo-redo.js';
 import { handleChatMessage } from './ai/agent-loop.js';
 import { exportDxf } from './geometry/dxf-export.js';
 import { exportStep } from './geometry/step-export.js';
-import type { WSMessage, MeshUpdatePayload, ChatMessagePayload } from '../../shared/index.js';
+import { executeTool } from './ai/tools.js';
+import type { WSMessage, MeshUpdatePayload, ChatMessagePayload, EntitySelectedPayload, ToolExecutePayload } from '../../shared/index.js';
 
 const PORT = 3000;
 
@@ -160,6 +161,22 @@ wss.on('connection', (ws: WebSocket) => {
         const meshes = docState.tessellateAll();
         sendWS({ type: 'mesh_update', payload: { meshes } satisfies MeshUpdatePayload });
         sendWS({ type: 'chat_response', payload: { role: 'assistant', content: result.description, done: true } });
+      } else if (msg.type === 'tool_execute' && docState && undoManager) {
+        const { tool, input } = msg.payload as ToolExecutePayload;
+        console.log(`Manual tool: ${tool}`, input);
+        undoManager.captureSnapshot(docState, `${tool}(manual)`);
+        try {
+          executeTool(docState, tool, input as Record<string, any>, undoManager);
+          const meshes = docState.tessellateAll();
+          sendWS({ type: 'mesh_update', payload: { meshes } satisfies MeshUpdatePayload });
+        } catch (err: any) {
+          console.error('Tool execute error:', err);
+          sendWS({ type: 'error', payload: { message: err.message || 'Tool execution failed' } });
+        }
+      } else if (msg.type === 'entity_selected' && docState) {
+        const { entityId } = msg.payload as EntitySelectedPayload;
+        docState.setSelectedEntityId(entityId);
+        console.log(`Selection: ${entityId ?? 'none'}`);
       }
     } catch (err) {
       console.error('Failed to parse WS message:', err);

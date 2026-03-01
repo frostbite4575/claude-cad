@@ -209,13 +209,13 @@ function writeDxfHeader(): string {
   return s;
 }
 
-function writeDxfEntity(entity: DxfEntity): string {
+function writeDxfEntity(entity: DxfEntity, layer: string = '0'): string {
   let s = '';
 
   switch (entity.type) {
     case 'LINE':
       s += dxfGroupCode(0, 'LINE');
-      s += dxfGroupCode(8, '0'); // layer
+      s += dxfGroupCode(8, layer);
       s += dxfGroupCode(10, entity.x1); // start X
       s += dxfGroupCode(20, entity.y1); // start Y
       s += dxfGroupCode(30, 0);         // start Z
@@ -226,7 +226,7 @@ function writeDxfEntity(entity: DxfEntity): string {
 
     case 'ARC':
       s += dxfGroupCode(0, 'ARC');
-      s += dxfGroupCode(8, '0');
+      s += dxfGroupCode(8, layer);
       s += dxfGroupCode(10, entity.cx);     // center X
       s += dxfGroupCode(20, entity.cy);     // center Y
       s += dxfGroupCode(30, 0);             // center Z
@@ -237,7 +237,7 @@ function writeDxfEntity(entity: DxfEntity): string {
 
     case 'CIRCLE':
       s += dxfGroupCode(0, 'CIRCLE');
-      s += dxfGroupCode(8, '0');
+      s += dxfGroupCode(8, layer);
       s += dxfGroupCode(10, entity.cx);
       s += dxfGroupCode(20, entity.cy);
       s += dxfGroupCode(30, 0);
@@ -248,8 +248,14 @@ function writeDxfEntity(entity: DxfEntity): string {
   return s;
 }
 
-/** Build a complete DXF string from entities */
-export function writeDxf(entities: DxfEntity[]): string {
+/** A DXF entity with an explicit layer assignment */
+export interface LayeredDxfEntity {
+  entity: DxfEntity;
+  layer: string;
+}
+
+/** Build a complete DXF string from entities, with optional extra layered entities */
+export function writeDxf(entities: DxfEntity[], extraLayered?: LayeredDxfEntity[]): string {
   let s = '';
   s += writeDxfHeader();
 
@@ -261,10 +267,40 @@ export function writeDxf(entities: DxfEntity[]): string {
     s += writeDxfEntity(entity);
   }
 
+  if (extraLayered) {
+    for (const { entity, layer } of extraLayered) {
+      s += writeDxfEntity(entity, layer);
+    }
+  }
+
   s += dxfGroupCode(0, 'ENDSEC');
   s += dxfGroupCode(0, 'EOF');
 
   return s;
+}
+
+/**
+ * Generate DXF LINE entities for bend lines on a sheet metal plate.
+ * Each bend line spans the full cross-dimension of the plate.
+ */
+export function buildBendLineDxfEntities(
+  bendLines: { position: number; axis: 'X' | 'Y' }[],
+  plateWidth: number,
+  plateLength: number
+): LayeredDxfEntity[] {
+  const result: LayeredDxfEntity[] = [];
+  for (const bend of bendLines) {
+    let line: DxfLine;
+    if (bend.axis === 'X') {
+      // Bend runs along X, at Y = position
+      line = { type: 'LINE', x1: 0, y1: bend.position, x2: plateWidth, y2: bend.position };
+    } else {
+      // Bend runs along Y, at X = position
+      line = { type: 'LINE', x1: bend.position, y1: 0, x2: bend.position, y2: plateLength };
+    }
+    result.push({ entity: line, layer: 'BEND' });
+  }
+  return result;
 }
 
 // --- Top-level Export ---
@@ -278,8 +314,9 @@ export interface DxfExportResult {
 /**
  * Export one or more OC shapes to DXF format.
  * Extracts edges, deduplicates, projects to XY, writes DXF string.
+ * Optionally includes extra layered entities (e.g. bend lines on BEND layer).
  */
-export function exportDxf(oc: OpenCascadeInstance, shapes: any[]): DxfExportResult {
+export function exportDxf(oc: OpenCascadeInstance, shapes: any[], extraLayered?: LayeredDxfEntity[]): DxfExportResult {
   const allEntities: DxfEntity[] = [];
   const allWarnings: string[] = [];
   const globalSeen = new Set<string>();
@@ -312,11 +349,12 @@ export function exportDxf(oc: OpenCascadeInstance, shapes: any[]): DxfExportResu
   // Deduplicate warnings
   const uniqueWarnings = [...new Set(allWarnings)];
 
-  const dxfContent = writeDxf(allEntities);
+  const dxfContent = writeDxf(allEntities, extraLayered);
+  const totalCount = allEntities.length + (extraLayered?.length ?? 0);
 
   return {
     dxfContent,
-    entityCount: allEntities.length,
+    entityCount: totalCount,
     warnings: uniqueWarnings,
   };
 }
