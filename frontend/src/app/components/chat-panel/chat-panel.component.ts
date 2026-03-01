@@ -107,6 +107,12 @@ export class ChatPanelComponent implements OnInit, OnDestroy {
     return this.sanitizer.bypassSecurityTrustHtml(html);
   }
 
+  clearChat() {
+    this.messages = [];
+    this.loading = false;
+    this.wsService.send({ type: 'clear_conversation', payload: {} });
+  }
+
   private formatToolName(name: string): string {
     return name.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
   }

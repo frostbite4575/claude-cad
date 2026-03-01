@@ -21,12 +21,9 @@ export function createFlatPlate(
  * Build a 3D folded shape from a flat plate definition with bend lines.
  * V1: sharp folds only (no cylindrical bend geometry). Single-axis bends only.
  *
- * Process:
- * 1. Sort bends by position along their axis
- * 2. Split plate into segments between bends
- * 3. Adjust segment lengths by bend deduction
- * 4. Create each segment as a box, rotate by cumulative angle, translate to position
- * 5. Boolean-fuse all segments (fallback to compound if fuse fails)
+ * Strategy: create each segment as a box at origin, then apply a compound
+ * transform (translate to pen position + rotate by cumulative angle around
+ * the bend axis at the pen position).
  */
 export function buildFoldedShape(
   oc: OpenCascadeInstance,
@@ -63,132 +60,117 @@ export function buildFoldedShape(
   const segmentLengths: number[] = [];
   for (let i = 0; i < boundaries.length - 1; i++) {
     let len = boundaries[i + 1] - boundaries[i];
-    // Subtract half deduction for bend on left side (if exists)
     if (i > 0) {
       len -= bendCalcs[i - 1].bend_deduction / 2;
     }
-    // Subtract half deduction for bend on right side (if exists)
     if (i < sorted.length) {
       len -= bendCalcs[i].bend_deduction / 2;
     }
-    segmentLengths.push(Math.max(len, 0.001)); // ensure positive
+    segmentLengths.push(Math.max(len, 0.001));
   }
 
-  // Build segments as boxes, positioned and rotated
+  // Build segments as boxes, positioned and rotated.
+  // We track a "pen" position and a cumulative direction angle.
+  // For axis='X': bends rotate in the Y-Z plane, pen tracks (penY, penZ)
+  // For axis='Y': bends rotate in the X-Z plane, pen tracks (penX, penZ)
   const segments: any[] = [];
-  let cumulativeAngle = 0; // radians
-  // Current "pen" position in 3D space (where the next segment starts)
-  let penX = 0;
-  let penY = 0;
+  let cumulativeAngle = 0; // radians, direction the current segment extends in
+  let penPrimary = 0; // position along the bend direction (Y for axis=X, X for axis=Y)
   let penZ = 0;
 
   for (let i = 0; i < segmentLengths.length; i++) {
     const segLen = segmentLengths[i];
 
-    // Create segment box: crossWidth along X, segLen along Y (bend direction), thickness along Z
+    // Create segment box at origin
     let segW: number, segL: number;
     if (axis === 'X') {
-      // Bends along X → segments stacked along Y
-      segW = crossWidth;
-      segL = segLen;
+      segW = crossWidth; // X dimension
+      segL = segLen;     // Y dimension (bend direction)
     } else {
-      // Bends along Y → segments stacked along X
-      segW = segLen;
-      segL = crossWidth;
+      segW = segLen;     // X dimension (bend direction)
+      segL = crossWidth; // Y dimension
     }
 
     const maker = new oc.BRepPrimAPI_MakeBox_1(segW, segL, thickness);
     let seg = maker.Shape();
     maker.delete();
 
-    // Apply cumulative rotation and translation
-    const trsf = new oc.gp_Trsf_1();
+    if (i > 0) {
+      // Need to: translate origin of segment to pen position, then rotate
+      // around the bend axis at the pen position by cumulative angle.
 
-    if (axis === 'X') {
-      // Translate to pen position, then rotate around X axis
-      if (cumulativeAngle !== 0) {
-        const rotAxis = new oc.gp_Ax1_2(
-          new oc.gp_Pnt_3(0, penY, penZ),
-          new oc.gp_Dir_4(1, 0, 0)
-        );
-        trsf.SetRotation_1(rotAxis, cumulativeAngle);
-        rotAxis.delete();
-      }
-      // Build translation for the segment origin
-      const translated = new oc.gp_Trsf_1();
-      if (i > 0) {
-        // Offset along rotated Y direction
-        // For simplicity in V1: place at pen position
-        translated.SetTranslation_1(new oc.gp_Vec_4(penX, penY, penZ));
-      }
-
-      if (i === 0 && cumulativeAngle === 0) {
-        // First segment, no transform needed
+      // Step 1: Translate segment to pen position
+      const tTranslate = new oc.gp_Trsf_1();
+      if (axis === 'X') {
+        tTranslate.SetTranslation_1(new oc.gp_Vec_4(0, penPrimary, penZ));
       } else {
-        const xform = new oc.BRepBuilderAPI_Transform_2(seg, trsf, true);
-        const newSeg = xform.Shape();
-        xform.delete();
-        seg = newSeg;
+        tTranslate.SetTranslation_1(new oc.gp_Vec_4(penPrimary, 0, penZ));
       }
 
-      translated.delete();
-    } else {
-      // Bends along Y axis
+      // Step 2: Rotate around the bend axis at the pen position
+      const tRotate = new oc.gp_Trsf_1();
       if (cumulativeAngle !== 0) {
-        const rotAxis = new oc.gp_Ax1_2(
-          new oc.gp_Pnt_3(penX, 0, penZ),
-          new oc.gp_Dir_4(0, 1, 0)
-        );
-        trsf.SetRotation_1(rotAxis, cumulativeAngle);
+        let rotAxis;
+        if (axis === 'X') {
+          rotAxis = new oc.gp_Ax1_2(
+            new oc.gp_Pnt_3(0, penPrimary, penZ),
+            new oc.gp_Dir_4(1, 0, 0)
+          );
+        } else {
+          rotAxis = new oc.gp_Ax1_2(
+            new oc.gp_Pnt_3(penPrimary, 0, penZ),
+            new oc.gp_Dir_4(0, 1, 0)
+          );
+        }
+        tRotate.SetRotation_1(rotAxis, cumulativeAngle);
         rotAxis.delete();
       }
 
-      if (i === 0 && cumulativeAngle === 0) {
-        // First segment, no transform needed
+      // Combine: first translate, then rotate around pen
+      const combined = new oc.gp_Trsf_1();
+      if (cumulativeAngle !== 0) {
+        combined.Multiply(tRotate);
+        combined.Multiply(tTranslate);
       } else {
-        const xform = new oc.BRepBuilderAPI_Transform_2(seg, trsf, true);
-        const newSeg = xform.Shape();
-        xform.delete();
-        seg = newSeg;
+        combined.Multiply(tTranslate);
       }
+
+      const xform = new oc.BRepBuilderAPI_Transform_2(seg, combined, true);
+      seg = xform.Shape();
+      xform.delete();
+      tTranslate.delete();
+      tRotate.delete();
+      combined.delete();
     }
 
-    trsf.delete();
     segments.push(seg);
 
     // Advance pen position for next segment
+    // The current segment extends along direction `cumulativeAngle` from its start
+    penPrimary += segLen * Math.cos(cumulativeAngle);
+    penZ += segLen * Math.sin(cumulativeAngle);
+
+    // Apply bend angle if there's a bend after this segment
     if (i < sorted.length) {
       const bendAngle = sorted[i].angle_deg * Math.PI / 180;
       const sign = sorted[i].direction === 'up' ? 1 : -1;
       cumulativeAngle += sign * bendAngle;
-
-      if (axis === 'X') {
-        // Moving along Y-Z plane
-        penY += segLen * Math.cos(cumulativeAngle - sign * bendAngle);
-        penZ += segLen * Math.sin(cumulativeAngle - sign * bendAngle);
-      } else {
-        // Moving along X-Z plane
-        penX += segLen * Math.cos(cumulativeAngle - sign * bendAngle);
-        penZ += segLen * Math.sin(cumulativeAngle - sign * bendAngle);
-      }
     }
   }
 
-  // Try to fuse all segments into one solid
+  // Combine segments
   if (segments.length === 1) {
     return segments[0];
   }
 
-  // Try boolean fuse
+  // Try boolean fuse (BRepAlgoAPI_Fuse_3 takes 2 args, no ProgressRange in this WASM build)
   try {
     let result = segments[0];
     for (let i = 1; i < segments.length; i++) {
       const fuse = new oc.BRepAlgoAPI_Fuse_3(result, segments[i]);
-      fuse.Build(new oc.Message_ProgressRange_1());
       if (fuse.IsDone()) {
         result = fuse.Shape();
       } else {
-        // Fuse failed — fall back to compound
         fuse.delete();
         return buildCompound(oc, segments);
       }
@@ -196,7 +178,6 @@ export function buildFoldedShape(
     }
     return result;
   } catch {
-    // Fallback: group as compound
     return buildCompound(oc, segments);
   }
 }

@@ -4,6 +4,12 @@ import { cadTools, executeTool } from './tools.js';
 import type { DocumentState } from '../state/document-state.js';
 import type { UndoRedoManager } from '../state/undo-redo.js';
 import type { WSMessage, ChatResponsePayload, ChatToolUsePayload, MeshUpdatePayload } from '../../../shared/index.js';
+import { readFileSync, writeFileSync, existsSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const HISTORY_PATH = join(__dirname, '..', '..', 'conversation-history.json');
 
 const SYSTEM_PROMPT = `You are Claude CAD, an AI assistant for a browser-based CAD tool designed for metal fabrication and plasma cutting.
 
@@ -55,7 +61,37 @@ Entity selection:
 const MODEL = 'claude-opus-4-20250514';
 const MAX_TOKENS = 4096;
 
-const conversationHistory: MessageParam[] = [];
+let conversationHistory: MessageParam[] = loadHistory();
+
+function loadHistory(): MessageParam[] {
+  try {
+    if (existsSync(HISTORY_PATH)) {
+      const data = readFileSync(HISTORY_PATH, 'utf-8');
+      const parsed = JSON.parse(data);
+      if (Array.isArray(parsed)) {
+        console.log(`Loaded ${parsed.length} conversation messages from disk`);
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Failed to load conversation history:', err);
+  }
+  return [];
+}
+
+function saveHistory(): void {
+  try {
+    writeFileSync(HISTORY_PATH, JSON.stringify(conversationHistory, null, 2), 'utf-8');
+  } catch (err) {
+    console.warn('Failed to save conversation history:', err);
+  }
+}
+
+export function clearConversationHistory(): void {
+  conversationHistory = [];
+  saveHistory();
+  console.log('Conversation history cleared');
+}
 
 // Tools that don't mutate state — no snapshot needed
 const READ_ONLY_TOOLS = new Set(['get_scene_info', 'export_dxf', 'export_step', 'undo', 'redo', 'get_flat_pattern', 'list_materials']);
@@ -172,6 +208,7 @@ export async function handleChatMessage(
 
     // If no tool use, we're done
     if (!hasToolUse || response.stop_reason === 'end_turn') {
+      saveHistory();
       break;
     }
 

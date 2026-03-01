@@ -84,7 +84,7 @@ export class DocumentState {
         name: entity.name,
         type: entity.type,
         shape: entity.shape,
-        metadata: { ...entity.metadata },
+        metadata: JSON.parse(JSON.stringify(entity.metadata)),
       });
     }
     return snapshots;
@@ -102,7 +102,7 @@ export class DocumentState {
         name: snap.name,
         type: snap.type,
         shape: snap.shape,
-        metadata: { ...snap.metadata },
+        metadata: JSON.parse(JSON.stringify(snap.metadata)),
       });
     }
     this.nextId = nextId;

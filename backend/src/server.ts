@@ -6,7 +6,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { initOC, getOC } from './geometry/oc-init.js';
 import { DocumentState } from './state/document-state.js';
 import { UndoRedoManager } from './state/undo-redo.js';
-import { handleChatMessage } from './ai/agent-loop.js';
+import { handleChatMessage, clearConversationHistory } from './ai/agent-loop.js';
 import { exportDxf } from './geometry/dxf-export.js';
 import { exportStep } from './geometry/step-export.js';
 import { executeTool } from './ai/tools.js';
@@ -173,6 +173,9 @@ wss.on('connection', (ws: WebSocket) => {
           console.error('Tool execute error:', err);
           sendWS({ type: 'error', payload: { message: err.message || 'Tool execution failed' } });
         }
+      } else if (msg.type === 'clear_conversation') {
+        clearConversationHistory();
+        sendWS({ type: 'chat_response', payload: { role: 'assistant', content: 'Conversation history cleared.', done: true } });
       } else if (msg.type === 'entity_selected' && docState) {
         const { entityId } = msg.payload as EntitySelectedPayload;
         docState.setSelectedEntityId(entityId);

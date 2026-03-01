@@ -1,12 +1,18 @@
 <canvas #canvas></canvas>
-<div class="entity-tooltip"
-     [class.visible]="tooltipVisible"
-     [style.left.px]="tooltipX"
-     [style.top.px]="tooltipY">
-  <div class="tooltip-name">{{ tooltipEntityName }}</div>
-  <div class="tooltip-type">{{ tooltipEntityType }}</div>
-  <div class="tooltip-dims">{{ tooltipDimensions }}</div>
+<div class="property-panel" [class.visible]="selectedEntityId">
+  <div class="prop-header">
+    <span class="prop-name">{{ propPanelName }}</span>
+    <button class="prop-close" (click)="deselectEntity()">&times;</button>
+  </div>
+  <div class="prop-row"><span class="prop-label">Type</span><span class="prop-value">{{ propPanelType }}</span></div>
+  <div class="prop-row"><span class="prop-label">Kind</span><span class="prop-value">{{ propPanelKind }}</span></div>
+  <div class="prop-row"><span class="prop-label">Size</span><span class="prop-value">{{ propPanelDims }}</span></div>
+  <div class="prop-actions">
+    <button class="prop-btn" (click)="extrudeSelected()">Extrude</button>
+    <button class="prop-btn danger" (click)="deleteSelected()">Delete</button>
+  </div>
 </div>
 <div class="coord-display" [class.visible]="drawingToolActive">
   X: {{ coordX }} &nbsp; Y: {{ coordY }}
+  <span class="snap-indicator" [class.on]="snapEnabled" (click)="toggleSnap()">SNAP {{ snapEnabled ? 'ON' : 'OFF' }}</span>
 </div>

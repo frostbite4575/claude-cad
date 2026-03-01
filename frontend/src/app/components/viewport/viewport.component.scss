@@ -12,41 +12,108 @@ canvas {
   height: 100%;
 }
 
-.entity-tooltip {
+.property-panel {
   position: absolute;
-  pointer-events: none;
-  background: rgba(20, 20, 40, 0.92);
-  border: 1px solid #4488cc;
-  border-radius: 4px;
-  padding: 6px 10px;
+  top: 12px;
+  right: 12px;
+  width: 200px;
+  background: rgba(20, 20, 40, 0.95);
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  padding: 10px 12px;
   font-family: 'Consolas', 'Monaco', monospace;
   font-size: 12px;
   color: #ccc;
   z-index: 100;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.15s ease;
-  white-space: nowrap;
-  transform: translate(-50%, -100%) translateY(-12px);
 
   &.visible {
     opacity: 1;
+    pointer-events: auto;
   }
 
-  .tooltip-name {
+  .prop-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid #2a2a4a;
+  }
+
+  .prop-name {
     font-weight: bold;
     color: #88bbee;
-    margin-bottom: 2px;
+    font-size: 13px;
   }
 
-  .tooltip-type {
-    color: #888;
+  .prop-close {
+    background: none;
+    border: none;
+    color: #666;
+    font-size: 16px;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+
+    &:hover {
+      color: #ccc;
+    }
+  }
+
+  .prop-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
+  .prop-label {
+    color: #666;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+  }
+
+  .prop-value {
+    color: #aaa;
     text-transform: capitalize;
-    margin-bottom: 2px;
   }
 
-  .tooltip-dims {
+  .prop-actions {
+    margin-top: 10px;
+    padding-top: 8px;
+    border-top: 1px solid #2a2a4a;
+    display: flex;
+    gap: 6px;
+  }
+
+  .prop-btn {
+    flex: 1;
+    padding: 4px 0;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.03);
+    color: #aaa;
+    font-family: inherit;
     font-size: 11px;
-    color: #777;
+    cursor: pointer;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.08);
+      color: #ddd;
+    }
+
+    &.danger {
+      border-color: #553333;
+      color: #cc6666;
+
+      &:hover {
+        background: rgba(200, 50, 50, 0.15);
+        color: #ee8888;
+      }
+    }
   }
 }
 
@@ -66,5 +133,27 @@ canvas {
 
   &.visible {
     opacity: 1;
+  }
+
+  .snap-indicator {
+    margin-left: 12px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    pointer-events: auto;
+    font-size: 10px;
+    font-weight: bold;
+    background: rgba(255, 255, 255, 0.05);
+    color: #666;
+    transition: color 0.15s, background 0.15s;
+
+    &.on {
+      color: #88eebb;
+      background: rgba(100, 255, 180, 0.1);
+    }
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.1);
+    }
   }
 }

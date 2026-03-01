@@ -20,7 +20,8 @@ export type WSMessageType =
   | 'undo'
   | 'redo'
   | 'entity_selected'
-  | 'tool_execute';
+  | 'tool_execute'
+  | 'clear_conversation';
 
 export interface WSMessage {
   type: WSMessageType;

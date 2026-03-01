@@ -1,4 +1,7 @@
-<div class="header">Chat</div>
+<div class="header">
+  <span>Chat</span>
+  <button class="clear-btn" title="Clear conversation" (click)="clearChat()">&times;</button>
+</div>
 <div class="messages" #messagesContainer>
   @for (msg of messages; track msg.timestamp) {
     @if (msg.role === 'user') {

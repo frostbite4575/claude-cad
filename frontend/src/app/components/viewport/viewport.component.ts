@@ -11,6 +11,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { WebsocketService, WSMessage } from '../../services/websocket.service';
 import { DrawingToolService, DrawingTool } from '../../services/drawing-tool.service';
+import { SelectionService } from '../../services/selection.service';
 import { Subscription } from 'rxjs';
 
 @Component({
@@ -34,24 +35,25 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
   // Entity selection state
   private entityRegistry = new Map<string, { mesh: THREE.Mesh | null; lines: THREE.LineSegments | null; kind: 'sketch' | 'solid' }>();
   private entityInfoCache = new Map<string, { name: string; type: string }>();
-  private selectedEntityId: string | null = null;
+  selectedEntityId: string | null = null;
   private raycaster = new THREE.Raycaster();
   private pointerDownPos = { x: 0, y: 0 };
 
-  // Tooltip (template-bound)
-  tooltipVisible = false;
-  tooltipX = 0;
-  tooltipY = 0;
-  tooltipEntityName = '';
-  tooltipEntityType = '';
-  tooltipDimensions = '';
+  // Property panel (template-bound)
+  propPanelName = '';
+  propPanelType = '';
+  propPanelKind = '';
+  propPanelDims = '';
 
   // Drawing mode state
   drawingToolActive = false;
   coordX = '';
   coordY = '';
+  snapEnabled = true;
+  snapSize = 0.25;
   private drawingPoints: THREE.Vector3[] = [];
   private previewGroup = new THREE.Group();
+  private gridGroup = new THREE.Group();
   private drawingPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
   private mouseWorldPos: THREE.Vector3 | null = null;
   private previewMaterial = new THREE.LineDashedMaterial({
@@ -64,6 +66,7 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
     private ngZone: NgZone,
     private wsService: WebsocketService,
     private drawingToolService: DrawingToolService,
+    private selectionService: SelectionService,
   ) {}
 
   ngOnInit() {
@@ -124,6 +127,7 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
 
       canvas.addEventListener('pointermove', this.onPointerMove);
       canvas.style.cursor = 'crosshair';
+      if (this.snapEnabled) this.showDrawingGrid();
     } else {
       this.drawingToolActive = false;
       this.drawingPoints = [];
@@ -131,6 +135,7 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
       this.coordX = '';
       this.coordY = '';
       this.clearPreview();
+      this.hideDrawingGrid();
 
       // Restore default orbit controls
       this.controls.mouseButtons = {
@@ -161,10 +166,11 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
     const hit = this.raycaster.ray.intersectPlane(this.drawingPlane, intersection);
 
     if (hit) {
-      this.mouseWorldPos = intersection;
+      const snapped = this.snapToGrid(intersection);
+      this.mouseWorldPos = snapped;
       this.ngZone.run(() => {
-        this.coordX = intersection.x.toFixed(3);
-        this.coordY = intersection.y.toFixed(3);
+        this.coordX = snapped.x.toFixed(3);
+        this.coordY = snapped.y.toFixed(3);
       });
       this.updatePreview();
     }
@@ -244,21 +250,19 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
         break;
 
       case 'arc':
+        // 3-point arc: start → end → midpoint on arc
         if (points.length >= 3) {
-          const center = points[0];
-          const radius = center.distanceTo(points[1]);
-          if (radius < 0.001) {
+          const arc = this.compute3PointArc(points[0], points[1], points[2]);
+          if (!arc) {
             this.finishShape();
             return;
           }
-          const startAngle = Math.atan2(points[1].y - center.y, points[1].x - center.x) * (180 / Math.PI);
-          const endAngle = Math.atan2(points[2].y - center.y, points[2].x - center.x) * (180 / Math.PI);
           this.sendToolExecute('sketch_arc', {
-            center_x: center.x,
-            center_y: center.y,
-            radius,
-            start_angle: startAngle,
-            end_angle: endAngle,
+            center_x: arc.cx,
+            center_y: arc.cy,
+            radius: arc.radius,
+            start_angle: arc.startDeg,
+            end_angle: arc.endDeg,
           });
           this.finishShape();
         }
@@ -320,23 +324,20 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
         break;
 
       case 'arc':
+        // 3-point arc: start → end → midpoint
         if (points.length === 1) {
-          // Radius line from center to mouse
+          // Show line from start to mouse (future end point)
           this.addPreviewLine(points[0], mouse);
         } else if (points.length === 2) {
-          // Arc from start angle sweeping to mouse angle
-          const center = points[0];
-          const radius = center.distanceTo(points[1]);
-          const startAngle = Math.atan2(points[1].y - center.y, points[1].x - center.x);
-          const endAngle = Math.atan2(mouse.y - center.y, mouse.x - center.x);
-          this.addPreviewArc(center, radius, startAngle, endAngle);
-          // Also show the radius lines
-          this.addPreviewLine(center, points[1]);
-          this.addPreviewLine(center, new THREE.Vector3(
-            center.x + radius * Math.cos(endAngle),
-            center.y + radius * Math.sin(endAngle),
-            0,
-          ));
+          // Show arc through start, end, and mouse as midpoint
+          const arc = this.compute3PointArc(points[0], points[1], mouse);
+          if (arc) {
+            const center = new THREE.Vector3(arc.cx, arc.cy, 0);
+            this.addPreviewArc(center, arc.radius, arc.startRad, arc.endRad);
+          } else {
+            // Collinear — show straight line
+            this.addPreviewLine(points[0], points[1]);
+          }
         }
         break;
     }
@@ -387,12 +388,124 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
     this.previewGroup.add(line);
   }
 
+  /**
+   * Compute a circular arc through 3 points: start, end, and a midpoint on the arc.
+   * Returns center, radius, and start/end angles, or null if collinear.
+   */
+  private compute3PointArc(
+    p1: THREE.Vector3, p2: THREE.Vector3, p3: THREE.Vector3
+  ): { cx: number; cy: number; radius: number; startRad: number; endRad: number; startDeg: number; endDeg: number } | null {
+    // Find circumscribed circle of triangle (p1, p2, p3)
+    const ax = p1.x, ay = p1.y;
+    const bx = p2.x, by = p2.y;
+    const cx = p3.x, cy = p3.y;
+
+    const D = 2 * (ax * (by - cy) + bx * (cy - ay) + cx * (ay - by));
+    if (Math.abs(D) < 1e-10) return null; // collinear
+
+    const ux = ((ax * ax + ay * ay) * (by - cy) + (bx * bx + by * by) * (cy - ay) + (cx * cx + cy * cy) * (ay - by)) / D;
+    const uy = ((ax * ax + ay * ay) * (cx - bx) + (bx * bx + by * by) * (ax - cx) + (cx * cx + cy * cy) * (bx - ax)) / D;
+    const radius = Math.sqrt((ax - ux) * (ax - ux) + (ay - uy) * (ay - uy));
+
+    if (radius < 0.001) return null;
+
+    // Angles from center to each point
+    const a1 = Math.atan2(ay - uy, ax - ux);
+    const a2 = Math.atan2(by - uy, bx - ux);
+    const a3 = Math.atan2(cy - uy, cx - ux);
+
+    // We need start=p1, end=p2, passing through p3.
+    // Determine arc direction: does going CCW from p1 to p2 pass through p3?
+    const normalizeAngle = (a: number) => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+    const na1 = normalizeAngle(a1);
+    const na2 = normalizeAngle(a2);
+    const na3 = normalizeAngle(a3);
+
+    // CCW sweep from p1 to p2
+    let ccwSweep = normalizeAngle(na2 - na1);
+    if (ccwSweep === 0) ccwSweep = Math.PI * 2;
+    // Check if p3 is within this CCW sweep
+    const toP3 = normalizeAngle(na3 - na1);
+    const p3InCCW = toP3 < ccwSweep;
+
+    let startRad: number, endRad: number;
+    if (p3InCCW) {
+      // CCW from p1 to p2 passes through p3
+      startRad = a1;
+      endRad = a2;
+    } else {
+      // CW from p1 to p2 passes through p3 — swap to get correct arc
+      startRad = a2;
+      endRad = a1;
+    }
+
+    return {
+      cx: ux, cy: uy, radius,
+      startRad, endRad,
+      startDeg: startRad * (180 / Math.PI),
+      endDeg: endRad * (180 / Math.PI),
+    };
+  }
+
   private clearPreview() {
     while (this.previewGroup.children.length > 0) {
       const child = this.previewGroup.children[0];
       this.previewGroup.remove(child);
       if (child instanceof THREE.Line) {
         child.geometry.dispose();
+      }
+    }
+  }
+
+  // --- Grid snap ---
+
+  private snapToGrid(pos: THREE.Vector3): THREE.Vector3 {
+    if (!this.snapEnabled) return pos;
+    const s = this.snapSize;
+    return new THREE.Vector3(
+      Math.round(pos.x / s) * s,
+      Math.round(pos.y / s) * s,
+      pos.z,
+    );
+  }
+
+  toggleSnap(): void {
+    this.snapEnabled = !this.snapEnabled;
+    if (this.drawingToolActive) {
+      this.snapEnabled ? this.showDrawingGrid() : this.hideDrawingGrid();
+    }
+  }
+
+  private showDrawingGrid() {
+    this.hideDrawingGrid();
+    const extent = 20; // inches each direction
+    const step = this.snapSize;
+    const points: THREE.Vector3[] = [];
+
+    // Lines parallel to Y
+    for (let x = -extent; x <= extent; x += step) {
+      points.push(new THREE.Vector3(x, -extent, 0.001));
+      points.push(new THREE.Vector3(x, extent, 0.001));
+    }
+    // Lines parallel to X
+    for (let y = -extent; y <= extent; y += step) {
+      points.push(new THREE.Vector3(-extent, y, 0.001));
+      points.push(new THREE.Vector3(extent, y, 0.001));
+    }
+
+    const geom = new THREE.BufferGeometry().setFromPoints(points);
+    const mat = new THREE.LineBasicMaterial({ color: 0x334466, transparent: true, opacity: 0.3 });
+    const lines = new THREE.LineSegments(geom, mat);
+    this.gridGroup.add(lines);
+  }
+
+  private hideDrawingGrid() {
+    while (this.gridGroup.children.length > 0) {
+      const child = this.gridGroup.children[0];
+      this.gridGroup.remove(child);
+      if (child instanceof THREE.LineSegments) {
+        child.geometry.dispose();
+        (child.material as THREE.Material).dispose();
       }
     }
   }
@@ -414,6 +527,7 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
     this.scene = new THREE.Scene();
     this.scene.add(this.meshGroup);
     this.scene.add(this.previewGroup);
+    this.scene.add(this.gridGroup);
 
     // Camera
     this.camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
@@ -465,6 +579,13 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
       this.drawingPoints = [];
       this.clearPreview();
       this.drawingToolService.clearTool();
+      return;
+    }
+
+    // Delete key deletes selected entity
+    if (event.key === 'Delete' && this.selectedEntityId) {
+      event.preventDefault();
+      this.sendToolExecute('delete_entity', { entity_id: this.selectedEntityId });
       return;
     }
 
@@ -520,13 +641,14 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
     }
 
     this.selectedEntityId = entityId;
+    this.selectionService.select(entityId);
 
     // Apply new highlight
     if (entityId) {
       this.applyHighlight(entityId, true);
-      this.updateTooltip(entityId);
+      this.updatePropertyPanel(entityId);
     } else {
-      this.tooltipVisible = false;
+      this.propPanelName = '';
     }
 
     // Notify backend
@@ -562,36 +684,35 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
     }
   }
 
-  private updateTooltip(entityId: string) {
+  private updatePropertyPanel(entityId: string) {
     const entry = this.entityRegistry.get(entityId);
     const info = this.entityInfoCache.get(entityId);
-    if (!entry || !info) {
-      this.tooltipVisible = false;
-      return;
-    }
+    if (!entry || !info) return;
 
-    // Compute bounding box center and project to screen
     const target = entry.mesh || entry.lines;
-    if (!target) {
-      this.tooltipVisible = false;
-      return;
-    }
+    if (!target) return;
 
     const bbox = new THREE.Box3().setFromObject(target);
-    const center = bbox.getCenter(new THREE.Vector3());
     const size = bbox.getSize(new THREE.Vector3());
 
-    // Project to screen
-    const projected = center.clone().project(this.camera);
-    const canvas = this.canvasRef.nativeElement;
-    const rect = canvas.getBoundingClientRect();
-    this.tooltipX = ((projected.x + 1) / 2) * rect.width;
-    this.tooltipY = ((-projected.y + 1) / 2) * rect.height;
+    this.propPanelName = info.name;
+    this.propPanelType = info.type;
+    this.propPanelKind = entry.kind;
+    this.propPanelDims = `${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)} in`;
+  }
 
-    this.tooltipEntityName = info.name;
-    this.tooltipEntityType = info.type;
-    this.tooltipDimensions = `${size.x.toFixed(2)} × ${size.y.toFixed(2)} × ${size.z.toFixed(2)} in`;
-    this.tooltipVisible = true;
+  deselectEntity(): void {
+    this.selectEntity(null);
+  }
+
+  deleteSelected(): void {
+    if (!this.selectedEntityId) return;
+    this.sendToolExecute('delete_entity', { entity_id: this.selectedEntityId });
+  }
+
+  extrudeSelected(): void {
+    if (!this.selectedEntityId) return;
+    this.sendToolExecute('extrude', { entity_id: this.selectedEntityId, height: 1.0 });
   }
 
   // --- Animation & message handling ---
@@ -601,10 +722,6 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
 
-    // Update tooltip position each frame if visible
-    if (this.tooltipVisible && this.selectedEntityId) {
-      this.ngZone.run(() => this.updateTooltip(this.selectedEntityId!));
-    }
   };
 
   private handleMessage(msg: WSMessage) {
@@ -619,11 +736,12 @@ export class ViewportComponent implements OnInit, AfterViewInit, OnDestroy {
       if (this.selectedEntityId) {
         if (this.entityRegistry.has(this.selectedEntityId)) {
           this.applyHighlight(this.selectedEntityId, true);
-          this.updateTooltip(this.selectedEntityId);
+          this.updatePropertyPanel(this.selectedEntityId);
         } else {
           // Entity was removed — auto-deselect
           this.selectedEntityId = null;
-          this.tooltipVisible = false;
+          this.selectionService.select(null);
+          this.propPanelName = '';
           this.wsService.send({
             type: 'entity_selected',
             payload: { entityId: null },

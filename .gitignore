@@ -26,5 +26,8 @@ Thumbs.db
 # TypeScript build info
 *.tsbuildinfo
 
+# Conversation history (persisted across restarts, not version-controlled)
+conversation-history.json
+
 # Claude Code
 .claude/

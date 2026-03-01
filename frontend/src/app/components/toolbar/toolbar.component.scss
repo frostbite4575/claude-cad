@@ -50,4 +50,9 @@
     border-color: #4488cc;
     color: #ffffff;
   }
+
+  &.disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+  }
 }
