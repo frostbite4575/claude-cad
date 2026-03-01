@@ -209,6 +209,42 @@ function writeDxfHeader(): string {
   return s;
 }
 
+/** Write TABLES section with layer and linetype definitions for strict DXF parsers */
+function writeDxfTables(layers: string[]): string {
+  let s = '';
+  s += dxfGroupCode(0, 'SECTION');
+  s += dxfGroupCode(2, 'TABLES');
+
+  // LTYPE table — CONTINUOUS linetype
+  s += dxfGroupCode(0, 'TABLE');
+  s += dxfGroupCode(2, 'LTYPE');
+  s += dxfGroupCode(70, 1); // max entries
+  s += dxfGroupCode(0, 'LTYPE');
+  s += dxfGroupCode(2, 'CONTINUOUS');
+  s += dxfGroupCode(70, 0);
+  s += dxfGroupCode(3, 'Solid line');
+  s += dxfGroupCode(72, 65); // alignment code
+  s += dxfGroupCode(73, 0);  // dash count
+  s += dxfGroupCode(40, 0);  // pattern length
+  s += dxfGroupCode(0, 'ENDTAB');
+
+  // LAYER table
+  s += dxfGroupCode(0, 'TABLE');
+  s += dxfGroupCode(2, 'LAYER');
+  s += dxfGroupCode(70, layers.length);
+  for (const name of layers) {
+    s += dxfGroupCode(0, 'LAYER');
+    s += dxfGroupCode(2, name);
+    s += dxfGroupCode(70, 0); // unfrozen, unlocked
+    s += dxfGroupCode(62, name === 'BEND' ? 5 : 7); // color: 5=blue for bend, 7=white for cut
+    s += dxfGroupCode(6, 'CONTINUOUS');
+  }
+  s += dxfGroupCode(0, 'ENDTAB');
+
+  s += dxfGroupCode(0, 'ENDSEC');
+  return s;
+}
+
 function writeDxfEntity(entity: DxfEntity, layer: string = '0'): string {
   let s = '';
 
@@ -256,8 +292,17 @@ export interface LayeredDxfEntity {
 
 /** Build a complete DXF string from entities, with optional extra layered entities */
 export function writeDxf(entities: DxfEntity[], extraLayered?: LayeredDxfEntity[]): string {
+  // Collect all unique layer names
+  const layerSet = new Set<string>(['0']);
+  if (extraLayered) {
+    for (const { layer } of extraLayered) {
+      layerSet.add(layer);
+    }
+  }
+
   let s = '';
   s += writeDxfHeader();
+  s += writeDxfTables([...layerSet]);
 
   // ENTITIES section
   s += dxfGroupCode(0, 'SECTION');
@@ -312,45 +357,243 @@ export interface DxfExportResult {
 }
 
 /**
+ * Classify edges by face wire orientation.
+ * Outer wire (perimeter) edges go on 'OUTSIDE' layer,
+ * inner wire (hole) edges go on 'INSIDE' layer.
+ * Returns layered entities for all edges.
+ */
+function classifyEdgesByWire(oc: OpenCascadeInstance, shape: any): { layered: LayeredDxfEntity[]; warnings: string[] } {
+  const layered: LayeredDxfEntity[] = [];
+  const warnings: string[] = [];
+  const seen = new Set<string>();
+
+  // Iterate over faces, then wires within each face
+  const faceExplorer = new oc.TopExp_Explorer_2(
+    shape,
+    oc.TopAbs_ShapeEnum.TopAbs_FACE,
+    oc.TopAbs_ShapeEnum.TopAbs_SHAPE
+  );
+
+  // Find the face with largest bounding box area (the XY-projected face)
+  let bestFace: any = null;
+  let bestArea = 0;
+
+  while (faceExplorer.More()) {
+    const face = oc.TopoDS.Face_1(faceExplorer.Current());
+    try {
+      const bbox = new oc.Bnd_Box_1();
+      oc.BRepBndLib.Add(face, bbox, false);
+      const min = bbox.CornerMin();
+      const max = bbox.CornerMax();
+      const dx = max.X() - min.X();
+      const dy = max.Y() - min.Y();
+      const area = dx * dy;
+      if (area > bestArea) {
+        bestArea = area;
+        bestFace = face;
+      }
+      min.delete(); max.delete(); bbox.delete();
+    } catch { /* skip */ }
+    faceExplorer.Next();
+  }
+  faceExplorer.delete();
+
+  if (!bestFace) {
+    // Fallback: just extract all edges on layer 0
+    const { entities, warnings: w } = extractEdges(oc, shape);
+    for (const entity of entities) {
+      layered.push({ entity, layer: '0' });
+    }
+    return { layered, warnings: w };
+  }
+
+  // Iterate wires on the best face
+  const wireExplorer = new oc.TopExp_Explorer_2(
+    bestFace,
+    oc.TopAbs_ShapeEnum.TopAbs_WIRE,
+    oc.TopAbs_ShapeEnum.TopAbs_SHAPE
+  );
+
+  // Get the outer wire of the face
+  let outerWire: any = null;
+  try {
+    outerWire = oc.ShapeAnalysis.OuterWire(bestFace);
+  } catch { /* couldn't determine outer wire */ }
+
+  while (wireExplorer.More()) {
+    const wire = oc.TopoDS.Wire_1(wireExplorer.Current());
+
+    // Check if this is the outer wire
+    let isOuter = false;
+    if (outerWire) {
+      try {
+        isOuter = wire.IsEqual(outerWire);
+      } catch {
+        // Fallback: check orientation
+        isOuter = wire.Orientation_1().value === oc.TopAbs_Orientation.TopAbs_FORWARD.value;
+      }
+    } else {
+      isOuter = wire.Orientation_1().value === oc.TopAbs_Orientation.TopAbs_FORWARD.value;
+    }
+
+    const layer = isOuter ? 'OUTSIDE' : 'INSIDE';
+
+    // Extract edges from this wire
+    const edgeExplorer = new oc.TopExp_Explorer_2(
+      wire,
+      oc.TopAbs_ShapeEnum.TopAbs_EDGE,
+      oc.TopAbs_ShapeEnum.TopAbs_SHAPE
+    );
+
+    while (edgeExplorer.More()) {
+      const edge = oc.TopoDS.Edge_1(edgeExplorer.Current());
+      try {
+        const adaptor = new oc.BRepAdaptor_Curve_2(edge);
+        const curveType = adaptor.GetType();
+        const first = adaptor.FirstParameter();
+        const last = adaptor.LastParameter();
+
+        if (curveType === oc.GeomAbs_CurveType.GeomAbs_Line) {
+          const p0 = adaptor.Value(first);
+          const p1 = adaptor.Value(last);
+          const x1 = p0.X(), y1 = p0.Y(), x2 = p1.X(), y2 = p1.Y();
+          p0.delete(); p1.delete();
+
+          const dx = x2 - x1, dy = y2 - y1;
+          if (Math.sqrt(dx * dx + dy * dy) >= POINT_TOLERANCE) {
+            const key = `L:${lineKey(x1, y1, x2, y2)}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              layered.push({ entity: { type: 'LINE', x1, y1, x2, y2 }, layer });
+            }
+          }
+        } else if (curveType === oc.GeomAbs_CurveType.GeomAbs_Circle) {
+          const circ = adaptor.Circle();
+          const loc = circ.Location();
+          const cx = loc.X(), cy = loc.Y();
+          const radius = circ.Radius();
+          const paramRange = Math.abs(last - first);
+          const isFullCircle = Math.abs(paramRange - 2 * Math.PI) < 0.001;
+
+          if (isFullCircle) {
+            const key = `C:${circleKey(cx, cy, radius)}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              layered.push({ entity: { type: 'CIRCLE', cx, cy, radius }, layer });
+            }
+          } else {
+            let startAngle = (first * 180) / Math.PI;
+            let endAngle = (last * 180) / Math.PI;
+            const orientation = edge.Orientation_1();
+            if (orientation.value === oc.TopAbs_Orientation.TopAbs_REVERSED.value) {
+              [startAngle, endAngle] = [endAngle, startAngle];
+            }
+            startAngle = ((startAngle % 360) + 360) % 360;
+            endAngle = ((endAngle % 360) + 360) % 360;
+
+            const key = `A:${arcKey(cx, cy, radius, startAngle, endAngle)}`;
+            if (!seen.has(key)) {
+              seen.add(key);
+              layered.push({ entity: { type: 'ARC', cx, cy, radius, startAngle, endAngle }, layer });
+            }
+          }
+
+          loc.delete(); circ.delete();
+        } else {
+          // Approximate with line segments
+          const step = (last - first) / APPROXIMATION_SEGMENTS;
+          for (let i = 0; i < APPROXIMATION_SEGMENTS; i++) {
+            const t0 = first + i * step;
+            const t1 = first + (i + 1) * step;
+            const p0 = adaptor.Value(t0);
+            const p1 = adaptor.Value(t1);
+            const x1 = p0.X(), y1 = p0.Y(), x2 = p1.X(), y2 = p1.Y();
+            p0.delete(); p1.delete();
+
+            const dx = x2 - x1, dy = y2 - y1;
+            if (Math.sqrt(dx * dx + dy * dy) >= POINT_TOLERANCE) {
+              const key = `L:${lineKey(x1, y1, x2, y2)}`;
+              if (!seen.has(key)) {
+                seen.add(key);
+                layered.push({ entity: { type: 'LINE', x1, y1, x2, y2 }, layer });
+              }
+            }
+          }
+        }
+
+        adaptor.delete();
+      } catch (err: any) {
+        warnings.push(`Failed to extract edge: ${err.message || String(err)}`);
+      }
+
+      edgeExplorer.Next();
+    }
+
+    edgeExplorer.delete();
+    wireExplorer.Next();
+  }
+
+  wireExplorer.delete();
+  return { layered, warnings };
+}
+
+/**
  * Export one or more OC shapes to DXF format.
  * Extracts edges, deduplicates, projects to XY, writes DXF string.
  * Optionally includes extra layered entities (e.g. bend lines on BEND layer).
+ * When classifyLayers is true, edges are assigned to OUTSIDE/INSIDE layers.
  */
-export function exportDxf(oc: OpenCascadeInstance, shapes: any[], extraLayered?: LayeredDxfEntity[]): DxfExportResult {
+export function exportDxf(
+  oc: OpenCascadeInstance,
+  shapes: any[],
+  extraLayered?: LayeredDxfEntity[],
+  classifyLayers: boolean = false
+): DxfExportResult {
+  const allLayered: LayeredDxfEntity[] = extraLayered ? [...extraLayered] : [];
   const allEntities: DxfEntity[] = [];
   const allWarnings: string[] = [];
   const globalSeen = new Set<string>();
 
   for (const shape of shapes) {
-    const { entities, warnings } = extractEdges(oc, shape);
-    allWarnings.push(...warnings);
-
-    // Deduplicate across shapes
-    for (const entity of entities) {
-      let key: string;
-      switch (entity.type) {
-        case 'LINE':
-          key = `L:${lineKey(entity.x1, entity.y1, entity.x2, entity.y2)}`;
-          break;
-        case 'ARC':
-          key = `A:${arcKey(entity.cx, entity.cy, entity.radius, entity.startAngle, entity.endAngle)}`;
-          break;
-        case 'CIRCLE':
-          key = `C:${circleKey(entity.cx, entity.cy, entity.radius)}`;
-          break;
+    if (classifyLayers) {
+      // Use wire-based classification
+      const { layered, warnings } = classifyEdgesByWire(oc, shape);
+      allWarnings.push(...warnings);
+      for (const item of layered) {
+        allLayered.push(item);
       }
-      if (!globalSeen.has(key)) {
-        globalSeen.add(key);
-        allEntities.push(entity);
+    } else {
+      // Original behavior: all edges on layer 0
+      const { entities, warnings } = extractEdges(oc, shape);
+      allWarnings.push(...warnings);
+
+      for (const entity of entities) {
+        let key: string;
+        switch (entity.type) {
+          case 'LINE':
+            key = `L:${lineKey(entity.x1, entity.y1, entity.x2, entity.y2)}`;
+            break;
+          case 'ARC':
+            key = `A:${arcKey(entity.cx, entity.cy, entity.radius, entity.startAngle, entity.endAngle)}`;
+            break;
+          case 'CIRCLE':
+            key = `C:${circleKey(entity.cx, entity.cy, entity.radius)}`;
+            break;
+        }
+        if (!globalSeen.has(key)) {
+          globalSeen.add(key);
+          allEntities.push(entity);
+        }
       }
     }
   }
 
-  // Deduplicate warnings
   const uniqueWarnings = [...new Set(allWarnings)];
 
-  const dxfContent = writeDxf(allEntities, extraLayered);
-  const totalCount = allEntities.length + (extraLayered?.length ?? 0);
+  const dxfContent = classifyLayers
+    ? writeDxf([], allLayered)
+    : writeDxf(allEntities, allLayered.length > 0 ? allLayered : undefined);
+  const totalCount = allEntities.length + allLayered.length;
 
   return {
     dxfContent,

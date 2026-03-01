@@ -41,6 +41,8 @@
     (keydown)="onKeydown($event)"
     [disabled]="loading"
   />
+  <input type="file" accept=".dxf" #fileInput style="display:none" (change)="onFileSelected($event)" />
+  <button class="upload-btn" title="Import DXF" (click)="fileInput.click()" [disabled]="loading">&#128206;</button>
   <button class="send-btn" (click)="send()" [disabled]="loading || !inputText.trim()">
     &#9654;
   </button>

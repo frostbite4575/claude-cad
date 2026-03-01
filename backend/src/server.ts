@@ -9,14 +9,31 @@ import { UndoRedoManager } from './state/undo-redo.js';
 import { handleChatMessage, clearConversationHistory } from './ai/agent-loop.js';
 import { exportDxf } from './geometry/dxf-export.js';
 import { exportStep } from './geometry/step-export.js';
+import { parseDxf, dxfToShapes } from './geometry/dxf-import.js';
 import { executeTool } from './ai/tools.js';
 import type { WSMessage, MeshUpdatePayload, ChatMessagePayload, EntitySelectedPayload, ToolExecutePayload } from '../../shared/index.js';
 
 const PORT = 3000;
 
+// Prevent silent crashes — log and keep running where possible
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err);
+  // If it's a WASM crash or something truly fatal, exit gracefully
+  if (err.message?.includes('RuntimeError') || err.message?.includes('memory')) {
+    console.error('Fatal WASM error — shutting down');
+    process.exit(1);
+  }
+  // Otherwise keep running — the error was logged
+});
+
 const app = express();
 app.use(cors({ origin: 'http://localhost:4200' }));
-app.use(express.json());
+app.use(express.json({ limit: '10mb' }));
+app.use(express.text({ limit: '10mb', type: 'text/plain' }));
 
 // Health check
 app.get('/api/health', (_req, res) => {
@@ -96,6 +113,62 @@ app.get('/api/export/step', (req, res) => {
   } catch (err: any) {
     console.error('STEP export error:', err);
     res.status(500).json({ error: err.message || 'STEP export failed' });
+  }
+});
+
+// DXF import
+app.post('/api/import/dxf', (req, res) => {
+  if (!docState) {
+    res.status(500).json({ error: 'Document state not initialized' });
+    return;
+  }
+
+  try {
+    const dxfContent = typeof req.body === 'string' ? req.body : req.body?.content;
+    if (!dxfContent || typeof dxfContent !== 'string') {
+      res.status(400).json({ error: 'Request body must contain DXF file content as text' });
+      return;
+    }
+
+    const parsed = parseDxf(dxfContent);
+    if (parsed.entities.length === 0) {
+      res.status(400).json({ error: 'No supported entities found in DXF file', warnings: parsed.warnings });
+      return;
+    }
+
+    const oc = getOC();
+    const { shape, entityCount } = dxfToShapes(oc, parsed);
+
+    if (undoManager) {
+      undoManager.captureSnapshot(docState, 'import_dxf');
+    }
+
+    const entity = docState.addEntity(
+      `DXF Import (${entityCount} entities)`,
+      'dxf_import',
+      shape,
+      { entityKind: 'sketch' as const, layers: parsed.layers }
+    );
+
+    // Broadcast mesh update to all connected clients
+    const meshes = docState.tessellateAll();
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ type: 'mesh_update', payload: { meshes } }));
+      }
+    });
+
+    res.json({
+      success: true,
+      entity_id: entity.id,
+      entity_count: entityCount,
+      layers: parsed.layers,
+      warnings: parsed.warnings,
+      skipped: parsed.skipped,
+    });
+  } catch (err: any) {
+    console.error('DXF import error:', err);
+    res.status(500).json({ error: err.message || 'DXF import failed' });
   }
 });
 
@@ -198,8 +271,8 @@ async function start() {
   undoManager = new UndoRedoManager();
   console.log('Document state initialized (empty scene, undo/redo enabled)');
 
-  server.listen(PORT, () => {
-    console.log(`Backend running on :${PORT}`);
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log(`Backend running on http://127.0.0.1:${PORT}`);
   });
 }
 

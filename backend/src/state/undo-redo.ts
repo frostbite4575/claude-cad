@@ -27,7 +27,7 @@ export class UndoRedoManager {
     };
 
     this.undoStack.push(snapshot);
-    this.evictOldSnapshots();
+    this.evictOldSnapshots(state);
 
     // Any new mutation invalidates the redo stack.
     // Clean up shapes that only exist in discarded redo snapshots.
@@ -85,10 +85,10 @@ export class UndoRedoManager {
    * When the undo stack exceeds maxDepth, evict the oldest snapshot
    * and .delete() any WASM shapes that are no longer referenced anywhere.
    */
-  private evictOldSnapshots(): void {
+  private evictOldSnapshots(state?: DocumentState): void {
     while (this.undoStack.length > this.maxDepth) {
       const evicted = this.undoStack.shift()!;
-      this.deleteOrphanedShapes(evicted);
+      this.deleteOrphanedShapes(evicted, state);
     }
   }
 
@@ -118,8 +118,15 @@ export class UndoRedoManager {
    * Delete shapes from an evicted snapshot that don't exist in current state
    * or any remaining snapshot in either stack.
    */
-  private deleteOrphanedShapes(evicted: StateSnapshot): void {
+  private deleteOrphanedShapes(evicted: StateSnapshot, state?: DocumentState): void {
     const referencedShapes = new Set<any>();
+
+    // Collect shapes from live document state
+    if (state) {
+      for (const entity of state.getAllEntities()) {
+        referencedShapes.add(entity.shape);
+      }
+    }
 
     // Collect shapes from both stacks
     for (const snapshot of this.undoStack) {

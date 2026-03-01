@@ -58,8 +58,9 @@ Entity selection:
 - When the user says "this", "it", "the selected entity", or references a shape without specifying an ID, operate on the currently selected entity from the scene context.
 - If no entity is selected and the user's intent is ambiguous, ask them to click the entity or specify an ID.`;
 
-const MODEL = 'claude-opus-4-20250514';
+const MODEL = process.env.CLAUDE_MODEL || 'claude-sonnet-4-20250514';
 const MAX_TOKENS = 4096;
+const MAX_HISTORY_MESSAGES = 50; // ~25 user/assistant turns
 
 let conversationHistory: MessageParam[] = loadHistory();
 
@@ -93,10 +94,65 @@ export function clearConversationHistory(): void {
   console.log('Conversation history cleared');
 }
 
+/**
+ * Prune conversation history to stay within limits.
+ * Keeps the most recent messages, ensuring the first kept message is a 'user' role
+ * (API requires alternating user/assistant, starting with user).
+ */
+function pruneHistory(): void {
+  if (conversationHistory.length <= MAX_HISTORY_MESSAGES) return;
+
+  const excess = conversationHistory.length - MAX_HISTORY_MESSAGES;
+  conversationHistory.splice(0, excess);
+
+  // Ensure first message is 'user' role (API requirement)
+  while (conversationHistory.length > 0 && conversationHistory[0].role !== 'user') {
+    conversationHistory.shift();
+  }
+
+  console.log(`Pruned conversation history to ${conversationHistory.length} messages`);
+}
+
 // Tools that don't mutate state — no snapshot needed
-const READ_ONLY_TOOLS = new Set(['get_scene_info', 'export_dxf', 'export_step', 'undo', 'redo', 'get_flat_pattern', 'list_materials']);
+const READ_ONLY_TOOLS = new Set([
+  'get_scene_info', 'export_dxf', 'export_step', 'undo', 'redo',
+  'get_flat_pattern', 'list_materials', 'measure_distance', 'measure_entity',
+  'list_templates', 'nest_preview', 'get_bend_table',
+  'estimate_weight', 'estimate_cost',
+]);
+
+// Concurrency guard — only one agent loop at a time
+let agentBusy = false;
 
 export async function handleChatMessage(
+  userMessage: string,
+  state: DocumentState,
+  sendWS: (msg: WSMessage) => void,
+  undoManager?: UndoRedoManager
+): Promise<void> {
+  // Reject if already processing
+  if (agentBusy) {
+    const busyMsg: WSMessage = {
+      type: 'chat_response',
+      payload: {
+        role: 'assistant',
+        content: 'I\'m still working on the previous request. Please wait for it to finish.',
+        done: true,
+      } satisfies ChatResponsePayload,
+    };
+    sendWS(busyMsg);
+    return;
+  }
+
+  agentBusy = true;
+  try {
+    await _runAgentLoop(userMessage, state, sendWS, undoManager);
+  } finally {
+    agentBusy = false;
+  }
+}
+
+async function _runAgentLoop(
   userMessage: string,
   state: DocumentState,
   sendWS: (msg: WSMessage) => void,
@@ -119,6 +175,9 @@ export async function handleChatMessage(
   });
 
   const client = getAnthropicClient();
+
+  // Prune before sending to avoid exceeding context window
+  pruneHistory();
 
   // Agent loop: keep calling API until end_turn
   while (true) {
@@ -189,7 +248,7 @@ export async function handleChatMessage(
         } as any);
 
         // Send updated scene mesh after state-changing tools
-        if (block.name !== 'get_scene_info') {
+        if (!READ_ONLY_TOOLS.has(block.name)) {
           const meshes = state.tessellateAll();
           const meshUpdate: WSMessage = {
             type: 'mesh_update',

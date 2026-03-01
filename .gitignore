@@ -29,5 +29,9 @@ Thumbs.db
 # Conversation history (persisted across restarts, not version-controlled)
 conversation-history.json
 
+# User data (templates, custom settings)
+backend/templates/
+custom-bend-table.json
+
 # Claude Code
 .claude/

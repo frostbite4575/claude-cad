@@ -1,6 +1,7 @@
 import { Component, ElementRef, OnDestroy, OnInit, ViewChild } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { HttpClient } from '@angular/common/http';
 import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { Subscription } from 'rxjs';
 import { WebsocketService } from '../../services/websocket.service';
@@ -21,7 +22,7 @@ export class ChatPanelComponent implements OnInit, OnDestroy {
 
   private subscription!: Subscription;
 
-  constructor(private wsService: WebsocketService, private sanitizer: DomSanitizer) {}
+  constructor(private wsService: WebsocketService, private sanitizer: DomSanitizer, private http: HttpClient) {}
 
   ngOnInit() {
     this.subscription = this.wsService.messages$.subscribe((msg) => {
@@ -105,6 +106,49 @@ export class ChatPanelComponent implements OnInit, OnDestroy {
     );
     // Bypass Angular sanitizer so href and download attributes are preserved
     return this.sanitizer.bypassSecurityTrustHtml(html);
+  }
+
+  onFileSelected(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    input.value = ''; // reset so same file can be re-selected
+
+    this.messages.push({
+      role: 'user',
+      content: `Uploading DXF: ${file.name}`,
+      timestamp: new Date(),
+    });
+    this.loading = true;
+    this.scrollToBottom();
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const content = reader.result as string;
+      this.http.post<any>('/api/import/dxf', content, {
+        headers: { 'Content-Type': 'text/plain' },
+      }).subscribe({
+        next: (res) => {
+          this.messages.push({
+            role: 'assistant',
+            content: `Imported ${file.name}: ${res.entity_count} entities on layers [${res.layers?.join(', ')}]. Entity ID: ${res.entity_id}${res.warnings?.length ? '. Warnings: ' + res.warnings.join('; ') : ''}`,
+            timestamp: new Date(),
+          });
+          this.loading = false;
+          this.scrollToBottom();
+        },
+        error: (err) => {
+          this.messages.push({
+            role: 'assistant',
+            content: `Failed to import DXF: ${err.error?.error || err.message || 'Unknown error'}`,
+            timestamp: new Date(),
+          });
+          this.loading = false;
+          this.scrollToBottom();
+        },
+      });
+    };
+    reader.readAsText(file);
   }
 
   clearChat() {

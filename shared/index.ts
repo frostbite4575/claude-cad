@@ -73,6 +73,9 @@ export interface EntityInfo {
     min: { x: number; y: number; z: number };
     max: { x: number; y: number; z: number };
   };
+  surfaceArea?: number;   // square inches
+  volume?: number;        // cubic inches
+  edgeLength?: number;    // total edge length (cut length) in inches
 }
 
 export interface SceneInfoPayload {

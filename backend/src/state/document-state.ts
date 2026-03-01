@@ -16,6 +16,9 @@ export class DocumentState {
   private nextId = 1;
   private oc: OpenCascadeInstance;
   private selectedEntityId: string | null = null;
+  // Tessellation cache: keyed by entity ID, invalidated on shape changes
+  private tessCache = new Map<string, TessellatedMesh>();
+  private entityVersions = new Map<string, number>();
 
   constructor(oc: OpenCascadeInstance) {
     this.oc = oc;
@@ -37,6 +40,7 @@ export class DocumentState {
     const id = `shape_${this.nextId++}`;
     const entity: Entity = { id, name, type, shape, metadata };
     this.entities.set(id, entity);
+    this.invalidateTessCache(id);
     return entity;
   }
 
@@ -49,6 +53,8 @@ export class DocumentState {
     const entity = this.entities.get(id);
     if (!entity) return false;
     this.entities.delete(id);
+    this.tessCache.delete(id);
+    this.entityVersions.delete(id);
     return true;
   }
 
@@ -57,6 +63,7 @@ export class DocumentState {
     const entity = this.entities.get(id);
     if (!entity) return false;
     entity.shape = newShape;
+    this.invalidateTessCache(id);
     return true;
   }
 
@@ -96,6 +103,8 @@ export class DocumentState {
    */
   restoreSnapshot(snapshots: EntitySnapshot[], nextId: number): void {
     this.entities.clear();
+    this.tessCache.clear();
+    this.entityVersions.clear();
     for (const snap of snapshots) {
       this.entities.set(snap.id, {
         id: snap.id,
@@ -108,14 +117,28 @@ export class DocumentState {
     this.nextId = nextId;
   }
 
+  private invalidateTessCache(id: string): void {
+    this.tessCache.delete(id);
+    this.entityVersions.set(id, (this.entityVersions.get(id) ?? 0) + 1);
+  }
+
   tessellateAll(): TessellatedMesh[] {
     const meshes: TessellatedMesh[] = [];
     for (const entity of this.entities.values()) {
+      // Check cache
+      const cached = this.tessCache.get(entity.id);
+      if (cached) {
+        meshes.push(cached);
+        continue;
+      }
+
       const mesh = tessellate(this.oc, entity.shape);
       mesh.entityId = entity.id;
       mesh.entityKind = (entity.metadata.entityKind as 'sketch' | 'solid') || 'solid';
       mesh.name = entity.name;
       mesh.entityType = entity.type;
+
+      this.tessCache.set(entity.id, mesh);
       meshes.push(mesh);
     }
     return meshes;
@@ -134,10 +157,37 @@ export class DocumentState {
           min: { x: min.X(), y: min.Y(), z: min.Z() },
           max: { x: max.X(), y: max.Y(), z: max.Z() },
         };
-        bbox.delete();
+        min.delete(); max.delete(); bbox.delete();
       } catch {
         // Bounding box computation failed — return zeros
       }
+
+      // Compute surface area and volume
+      let surfaceArea: number | undefined;
+      let volume: number | undefined;
+      let edgeLength: number | undefined;
+
+      try {
+        const surfProps = new this.oc.GProp_GProps_1();
+        this.oc.BRepGProp.SurfaceProperties_1(entity.shape, surfProps, false);
+        surfaceArea = Math.round(surfProps.Mass() * 10000) / 10000;
+        surfProps.delete();
+      } catch { /* skip */ }
+
+      try {
+        const volProps = new this.oc.GProp_GProps_1();
+        this.oc.BRepGProp.VolumeProperties_1(entity.shape, volProps, false);
+        volume = Math.round(volProps.Mass() * 10000) / 10000;
+        volProps.delete();
+      } catch { /* skip */ }
+
+      // Compute total edge length (cut length for DXF)
+      try {
+        const linProps = new this.oc.GProp_GProps_1();
+        this.oc.BRepGProp.LinearProperties(entity.shape, linProps, false);
+        edgeLength = Math.round(linProps.Mass() * 10000) / 10000;
+        linProps.delete();
+      } catch { /* skip */ }
 
       infos.push({
         id: entity.id,
@@ -145,6 +195,9 @@ export class DocumentState {
         type: entity.type,
         entityKind: (entity.metadata.entityKind as 'sketch' | 'solid') || 'solid',
         boundingBox,
+        surfaceArea,
+        volume,
+        edgeLength,
       });
     }
     return infos;

@@ -10,6 +10,7 @@ export function tessellate(oc: OpenCascadeInstance, shape: any): TessellatedMesh
   // Tessellate the shape
   const mesh = new oc.BRepMesh_IncrementalMesh_2(shape, 0.1, false, 0.5, false);
 
+  try {
   // Extract faces (triangles)
   const faceExplorer = new oc.TopExp_Explorer_2(
     shape,
@@ -129,7 +130,9 @@ export function tessellate(oc: OpenCascadeInstance, shape: any): TessellatedMesh
   }
 
   edgeExplorer.delete();
-  mesh.delete();
 
   return { vertices, indices, normals, edges };
+  } finally {
+    mesh.delete();
+  }
 }

@@ -132,6 +132,49 @@ export function createSketchArc(
 }
 
 /**
+ * Create a closed 2D profile (face) from an array of {x, y} points.
+ * Connects points in order, closes the loop, and makes a face.
+ * Minimum 3 points required.
+ */
+export function createFlatProfile(
+  oc: OpenCascadeInstance,
+  points: { x: number; y: number }[],
+  z: number = 0
+): any {
+  if (points.length < 3) {
+    throw new Error('Flat profile requires at least 3 points');
+  }
+
+  const ocPoints = points.map(p => new oc.gp_Pnt_3(p.x, p.y, z));
+
+  const edges: any[] = [];
+  for (let i = 0; i < ocPoints.length; i++) {
+    const next = (i + 1) % ocPoints.length;
+    const edgeMaker = new oc.BRepBuilderAPI_MakeEdge_3(ocPoints[i], ocPoints[next]);
+    edges.push(edgeMaker.Edge());
+    edgeMaker.delete();
+  }
+
+  const wireBuilder = new oc.BRepBuilderAPI_MakeWire_1();
+  for (const edge of edges) {
+    wireBuilder.Add_1(edge);
+  }
+  const wire = wireBuilder.Wire();
+
+  const faceMaker = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
+  const face = faceMaker.Shape();
+
+  // Cleanup
+  faceMaker.delete();
+  wire.delete();
+  wireBuilder.delete();
+  for (const e of edges) e.delete();
+  for (const c of ocPoints) c.delete();
+
+  return face;
+}
+
+/**
  * Extrude a face (sketch) into a 3D solid along a direction vector.
  * Default direction is Z-up.
  */

@@ -2,16 +2,20 @@ import type { Tool } from '@anthropic-ai/sdk/resources/messages.js';
 import type { DocumentState } from '../state/document-state.js';
 import { getOC } from '../geometry/oc-init.js';
 import { createBox, createCylinder, createSphere, createPolygonExtrusion } from '../geometry/primitives.js';
-import { createSketchLine, createSketchRectangle, createSketchCircle, createSketchArc, extrudeShape } from '../geometry/sketches.js';
+import { createSketchLine, createSketchRectangle, createSketchCircle, createSketchArc, createFlatProfile, extrudeShape } from '../geometry/sketches.js';
 import { booleanUnion, booleanSubtract, booleanIntersect } from '../geometry/booleans.js';
-import { translateShape, rotateShape, mirrorShape, linearPatternCopies, circularPatternCopies } from '../geometry/transforms.js';
+import { translateShape, rotateShape, mirrorShape, scaleShape, linearPatternCopies, circularPatternCopies } from '../geometry/transforms.js';
 import { exportDxf, buildBendLineDxfEntities } from '../geometry/dxf-export.js';
+import { parseDxf, dxfToShapes } from '../geometry/dxf-import.js';
 import { exportStep } from '../geometry/step-export.js';
-import { filletAllEdges, chamferAllEdges } from '../geometry/fillets.js';
-import { MATERIALS_DB, findMaterial, calculateBend } from '../materials/materials.js';
+import { filletAllEdges, filletEdges, chamferEdges, countEdges } from '../geometry/fillets.js';
+import type { EdgeFilter } from '../geometry/fillets.js';
+import { MATERIALS_DB, findMaterial, calculateBend, getBoltClearance, BOLT_CLEARANCE, setCustomBend, getAllBendOverrides, MATERIAL_DENSITY, MATERIAL_COST_PER_LB, DEFAULT_CUT_COST_PER_INCH } from '../materials/materials.js';
 import type { BendLine } from '../materials/materials.js';
 import { createFlatPlate, buildFoldedShape } from '../geometry/sheet-metal.js';
 import type { UndoRedoManager } from '../state/undo-redo.js';
+import { saveTemplate, loadTemplate, listTemplates, deleteTemplate } from '../state/templates.js';
+import type { PartTemplate } from '../state/templates.js';
 
 export const cadTools: Tool[] = [
   {
@@ -138,6 +142,21 @@ export const cadTools: Tool[] = [
     },
   },
   {
+    name: 'scale',
+    description: 'Scale an entity by a uniform factor. Factor > 1 enlarges, < 1 shrinks. Optionally specify a center point for scaling (default: origin).',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to scale' },
+        factor: { type: 'number', description: 'Scale factor (e.g. 0.5 = half size, 2 = double size)' },
+        center_x: { type: 'number', description: 'Scale center X (default: 0)' },
+        center_y: { type: 'number', description: 'Scale center Y (default: 0)' },
+        center_z: { type: 'number', description: 'Scale center Z (default: 0)' },
+      },
+      required: ['entity_id', 'factor'],
+    },
+  },
+  {
     name: 'get_scene_info',
     description: 'List all entities currently in the scene with their IDs, names, types, and bounding boxes.',
     input_schema: {
@@ -159,35 +178,40 @@ export const cadTools: Tool[] = [
   },
   {
     name: 'fillet',
-    description: 'Round (fillet) all edges of a shape with a constant radius. Useful for removing sharp corners. Radius must be small enough to fit the geometry.',
+    description: 'Round (fillet) edges of a shape with a constant radius. Supports filtering by edge orientation (all, vertical, horizontal, top, bottom) or specific edge indices. Use get_edge_count to see how many edges a shape has.',
     input_schema: {
       type: 'object' as const,
       properties: {
         entity_id: { type: 'string', description: 'Entity ID to fillet' },
         radius: { type: 'number', description: 'Fillet radius in inches' },
+        edge_filter: { type: 'string', enum: ['all', 'vertical', 'horizontal', 'top', 'bottom'], description: 'Which edges to fillet (default: all)' },
+        edge_indices: { type: 'array', items: { type: 'number' }, description: 'Specific 0-based edge indices to fillet (overrides edge_filter)' },
       },
       required: ['entity_id', 'radius'],
     },
   },
   {
     name: 'chamfer',
-    description: 'Bevel (chamfer) all edges of a shape with a constant distance. Creates flat angled cuts at edges instead of rounds.',
+    description: 'Bevel (chamfer) edges of a shape with a constant distance. Supports filtering by edge orientation (all, vertical, horizontal, top, bottom) or specific edge indices.',
     input_schema: {
       type: 'object' as const,
       properties: {
         entity_id: { type: 'string', description: 'Entity ID to chamfer' },
         distance: { type: 'number', description: 'Chamfer distance in inches' },
+        edge_filter: { type: 'string', enum: ['all', 'vertical', 'horizontal', 'top', 'bottom'], description: 'Which edges to chamfer (default: all)' },
+        edge_indices: { type: 'array', items: { type: 'number' }, description: 'Specific 0-based edge indices to chamfer (overrides edge_filter)' },
       },
       required: ['entity_id', 'distance'],
     },
   },
   {
     name: 'export_dxf',
-    description: 'Export the scene (or a single entity) as a DXF file for plasma cutting. Returns a download URL. DXF output contains only lines, arcs, and circles (no splines) projected onto the XY plane, in inches.',
+    description: 'Export the scene (or a single entity) as a DXF file for plasma cutting. Returns a download URL. DXF output contains only lines, arcs, and circles (no splines) projected onto the XY plane, in inches. Use classify_layers=true to auto-assign outside perimeter and inside holes/slots to separate OUTSIDE/INSIDE layers for ProNest.',
     input_schema: {
       type: 'object' as const,
       properties: {
         entity_id: { type: 'string', description: 'Optional entity ID to export. If omitted, exports all entities.' },
+        classify_layers: { type: 'boolean', description: 'If true, auto-classify contours as OUTSIDE (perimeter) or INSIDE (holes/slots) on separate DXF layers. Useful for ProNest import.' },
       },
       required: [],
     },
@@ -199,6 +223,17 @@ export const cadTools: Tool[] = [
       type: 'object' as const,
       properties: {
         entity_id: { type: 'string', description: 'Optional entity ID to export. If omitted, exports all entities.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'import_dxf',
+    description: 'Import a DXF file from a URL or file path. Creates sketch entities from the DXF content (LINE, ARC, CIRCLE, LWPOLYLINE). Use this when a user wants to load, view, or modify an existing DXF file. Note: the actual file upload happens via HTTP POST to /api/import/dxf — tell the user to drag and drop or use the upload button in the chat panel.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        content: { type: 'string', description: 'DXF file content as a string (if provided directly)' },
       },
       required: [],
     },
@@ -264,8 +299,71 @@ export const cadTools: Tool[] = [
     },
   },
   {
+    name: 'sketch_line_relative',
+    description: 'Draw a line from a start point using relative offsets (dx, dy). Useful for chain drawing — "from (x,y), go right 4 and up 2". Open geometry. Coordinates in inches.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        x: { type: 'number', description: 'Start X in inches' },
+        y: { type: 'number', description: 'Start Y in inches' },
+        dx: { type: 'number', description: 'Relative X offset in inches' },
+        dy: { type: 'number', description: 'Relative Y offset in inches' },
+        z: { type: 'number', description: 'Z plane (default 0)' },
+      },
+      required: ['x', 'y', 'dx', 'dy'],
+    },
+  },
+  {
+    name: 'sketch_polyline',
+    description: 'Draw a connected chain of line segments from an array of points. Each point connects to the next. If "closed" is true, last point connects back to first and creates a face (extrudable). Great for complex profiles like brackets, gussets, tabs.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        points: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              x: { type: 'number' },
+              y: { type: 'number' },
+            },
+            required: ['x', 'y'],
+          },
+          description: 'Array of {x, y} points in inches. Minimum 2 for open, 3 for closed.',
+        },
+        closed: { type: 'boolean', description: 'If true, close the loop and create a face (default false)' },
+        z: { type: 'number', description: 'Z plane (default 0)' },
+      },
+      required: ['points'],
+    },
+  },
+  {
+    name: 'create_flat_profile',
+    description: 'Create a closed 2D flat profile from an array of {x, y} points. The profile is a face on the XY plane that can be extruded or exported directly to DXF for plasma cutting. Minimum 3 points. Points are connected in order and the loop is closed automatically.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Name for the profile (e.g. "bracket", "gusset")' },
+        points: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              x: { type: 'number' },
+              y: { type: 'number' },
+            },
+            required: ['x', 'y'],
+          },
+          description: 'Array of {x, y} points in inches defining the profile outline. Minimum 3 points.',
+        },
+        z: { type: 'number', description: 'Z plane (default 0)' },
+      },
+      required: ['points'],
+    },
+  },
+  {
     name: 'extrude',
-    description: 'Extrude a 2D sketch face (rectangle or circle) into a 3D solid. Only works on closed sketch entities (not lines or arcs). The sketch is replaced by the resulting solid.',
+    description: 'Extrude a 2D sketch face (rectangle, circle, or flat profile) into a 3D solid. Only works on closed sketch entities (not lines or arcs). The sketch is replaced by the resulting solid.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -356,7 +454,7 @@ export const cadTools: Tool[] = [
   },
   {
     name: 'fold_sheet_metal',
-    description: 'Create a 3D folded preview of a sheet metal plate with bend lines. The original flat plate is preserved. Creates a new entity showing the folded shape.',
+    description: 'Fold a sheet metal plate along its bend lines into a 3D shape. Replaces the flat plate with the folded version. Use undo to get back to the flat plate. Supports bends on both X and Y axes.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -398,6 +496,21 @@ export const cadTools: Tool[] = [
         depth: { type: 'number', description: 'Optional cut depth in inches. Defaults to entity thickness (cuts through).' },
       },
       required: ['entity_id', 'center_x', 'center_y', 'radius'],
+    },
+  },
+  {
+    name: 'cut_bolt_hole',
+    description: 'Cut a clearance hole for a standard bolt size (e.g. "3/8", "1/4", "#10"). Uses ASME B18.2.8 standard clearance diameters so bolts fit properly. Preferred over cut_hole when the user specifies a bolt size.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the solid to cut' },
+        center_x: { type: 'number', description: 'Hole center X position in inches' },
+        center_y: { type: 'number', description: 'Hole center Y position in inches' },
+        bolt_size: { type: 'string', description: 'Bolt nominal size, e.g. "3/8", "1/4", "#10", "1/2"' },
+        fit: { type: 'string', enum: ['close', 'standard', 'loose'], description: 'Clearance fit type. Default: standard' },
+      },
+      required: ['entity_id', 'center_x', 'center_y', 'bolt_size'],
     },
   },
   {
@@ -472,7 +585,179 @@ export const cadTools: Tool[] = [
       required: [],
     },
   },
+  {
+    name: 'measure_distance',
+    description: 'Measure the distance between two 3D points. All coordinates in inches. Returns the straight-line distance.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        x1: { type: 'number', description: 'First point X' },
+        y1: { type: 'number', description: 'First point Y' },
+        z1: { type: 'number', description: 'First point Z (default 0)', default: 0 },
+        x2: { type: 'number', description: 'Second point X' },
+        y2: { type: 'number', description: 'Second point Y' },
+        z2: { type: 'number', description: 'Second point Z (default 0)', default: 0 },
+      },
+      required: ['x1', 'y1', 'x2', 'y2'],
+    },
+  },
+  {
+    name: 'measure_entity',
+    description: 'Measure properties of an entity: bounding box dimensions, surface area, volume, and total edge length (cut length). Returns all available measurements.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to measure' },
+      },
+      required: ['entity_id'],
+    },
+  },
+  {
+    name: 'save_template',
+    description: 'Save the current entity as a reusable part template. Templates are stored on disk and persist across sessions. Use for brackets, gussets, plates, or any commonly repeated part.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to save as template' },
+        name: { type: 'string', description: 'Template name (e.g. "4x6 gusset", "mounting bracket")' },
+        description: { type: 'string', description: 'Optional description of the part' },
+      },
+      required: ['entity_id', 'name'],
+    },
+  },
+  {
+    name: 'load_template',
+    description: 'Load a saved part template and create it in the scene. Returns the new entity ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Template name to load' },
+        offset_x: { type: 'number', description: 'X offset for placement (default 0)' },
+        offset_y: { type: 'number', description: 'Y offset for placement (default 0)' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'list_templates',
+    description: 'List all saved part templates.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: 'delete_template',
+    description: 'Delete a saved part template.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        name: { type: 'string', description: 'Template name to delete' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'nest_preview',
+    description: 'Calculate how many copies of a part fit on a standard sheet. Returns count, layout, and material utilization percentage. Axis-aligned placement (no rotation). Useful for quoting jobs.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to nest' },
+        sheet_width: { type: 'number', description: 'Sheet width in inches (default 48)' },
+        sheet_length: { type: 'number', description: 'Sheet length in inches (default 96)' },
+        spacing: { type: 'number', description: 'Gap between parts in inches (default 0.25)' },
+      },
+      required: ['entity_id'],
+    },
+  },
+  {
+    name: 'estimate_weight',
+    description: 'Estimate the weight of an entity based on its volume and material density. Returns weight in pounds. If the entity has sheet metal material info, uses that. Otherwise, specify a material_type.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to weigh' },
+        material_type: { type: 'string', enum: ['mild steel', 'stainless', 'aluminum'], description: 'Material type (auto-detected for sheet metal entities)' },
+      },
+      required: ['entity_id'],
+    },
+  },
+  {
+    name: 'estimate_cost',
+    description: 'Estimate material cost and cut cost for a part. Uses volume for material cost ($/lb × weight) and edge length for cut cost ($/inch). Returns itemized breakdown. For sheet metal entities, material is auto-detected.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to price' },
+        material_type: { type: 'string', enum: ['mild steel', 'stainless', 'aluminum'], description: 'Material type (auto-detected for sheet metal)' },
+        material_cost_per_lb: { type: 'number', description: 'Override material cost per pound (default: mild steel $0.50, stainless $2.00, aluminum $1.50)' },
+        cut_cost_per_inch: { type: 'number', description: 'Override cut cost per inch of cut (default: $0.02)' },
+        quantity: { type: 'number', description: 'Number of parts (default: 1)' },
+      },
+      required: ['entity_id'],
+    },
+  },
+  {
+    name: 'set_kerf',
+    description: 'Set kerf compensation for an entity. Annotates the entity with kerf width and cut side (inside/outside/centerline). DXF export will use layer naming to indicate cut side. Typical plasma kerf: 0.06" for thin, 0.08" for thick.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to annotate' },
+        kerf_width: { type: 'number', description: 'Kerf width in inches' },
+        cut_side: { type: 'string', enum: ['inside', 'outside', 'centerline'], description: 'Which side of the line the torch follows (default: centerline)' },
+      },
+      required: ['entity_id', 'kerf_width'],
+    },
+  },
+  {
+    name: 'set_custom_bend_table',
+    description: 'Set a custom K-factor for a specific material and thickness combination. Overrides the default from the materials database. Use when a shop has calibrated their press brake differently.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        material_name: { type: 'string', description: 'Material name (e.g. "16ga mild steel")' },
+        k_factor: { type: 'number', description: 'Custom K-factor (typically 0.3-0.5)' },
+        inner_bend_radius: { type: 'number', description: 'Optional custom inner bend radius in inches' },
+      },
+      required: ['material_name', 'k_factor'],
+    },
+  },
+  {
+    name: 'get_bend_table',
+    description: 'Get the current bend table showing K-factors and bend radii for all materials, including any custom overrides.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {},
+      required: [],
+    },
+  },
 ];
+
+/**
+ * Validate that numeric inputs are finite positive numbers where required.
+ * Returns an error string if validation fails, or null if OK.
+ */
+function validatePositive(input: Record<string, any>, ...fields: string[]): string | null {
+  for (const f of fields) {
+    const val = input[f];
+    if (val === undefined || val === null) return `Missing required field: ${f}`;
+    if (typeof val !== 'number' || !isFinite(val)) return `${f} must be a finite number, got: ${val}`;
+    if (val <= 0) return `${f} must be positive, got: ${val}`;
+  }
+  return null;
+}
+
+function validateNumeric(input: Record<string, any>, ...fields: string[]): string | null {
+  for (const f of fields) {
+    const val = input[f];
+    if (val === undefined || val === null) return `Missing required field: ${f}`;
+    if (typeof val !== 'number' || !isFinite(val)) return `${f} must be a finite number, got: ${val}`;
+  }
+  return null;
+}
 
 export function executeTool(
   state: DocumentState,
@@ -485,6 +770,8 @@ export function executeTool(
   try {
     switch (toolName) {
       case 'create_box': {
+        const boxErr = validatePositive(input, 'width', 'height', 'depth');
+        if (boxErr) return JSON.stringify({ success: false, error: boxErr });
         const shape = createBox(oc, input.width, input.height, input.depth);
         const entity = state.addEntity(
           `Box ${input.width}x${input.height}x${input.depth}`,
@@ -499,6 +786,8 @@ export function executeTool(
       }
 
       case 'create_cylinder': {
+        const cylErr = validatePositive(input, 'radius', 'height');
+        if (cylErr) return JSON.stringify({ success: false, error: cylErr });
         const shape = createCylinder(oc, input.radius, input.height);
         const entity = state.addEntity(
           `Cylinder r=${input.radius} h=${input.height}`,
@@ -513,6 +802,8 @@ export function executeTool(
       }
 
       case 'create_sphere': {
+        const sphErr = validatePositive(input, 'radius');
+        if (sphErr) return JSON.stringify({ success: false, error: sphErr });
         const shape = createSphere(oc, input.radius);
         const entity = state.addEntity(
           `Sphere r=${input.radius}`,
@@ -630,14 +921,44 @@ export function executeTool(
         });
       }
 
+      case 'scale': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (!input.factor || input.factor <= 0) {
+          return JSON.stringify({ success: false, error: 'Scale factor must be a positive number' });
+        }
+        const newShape = scaleShape(oc, e.shape, input.factor, input.center_x ?? 0, input.center_y ?? 0, input.center_z ?? 0);
+        state.replaceShape(input.entity_id, newShape);
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          description: `Scaled ${input.entity_id} by factor ${input.factor}`,
+        });
+      }
+
       case 'get_scene_info': {
         const info = state.getSceneInfo();
         return JSON.stringify({
           success: true,
-          entities: info,
+          entities: info.map(e => ({
+            ...e,
+            surfaceArea: e.surfaceArea ? `${e.surfaceArea} sq in` : undefined,
+            volume: e.volume ? `${e.volume} cu in` : undefined,
+            edgeLength: e.edgeLength ? `${e.edgeLength} in (cut length)` : undefined,
+          })),
           description: info.length === 0
             ? 'Scene is empty'
-            : `Scene contains ${info.length} entity(ies): ${info.map((e) => `${e.id} (${e.name})`).join(', ')}`,
+            : `Scene contains ${info.length} entity(ies): ${info.map((e) => {
+                let desc = `${e.id} (${e.name})`;
+                const details: string[] = [];
+                if (e.surfaceArea) details.push(`area=${e.surfaceArea} sq in`);
+                if (e.volume) details.push(`vol=${e.volume} cu in`);
+                if (e.edgeLength) details.push(`cut=${e.edgeLength} in`);
+                if (details.length) desc += ` [${details.join(', ')}]`;
+                return desc;
+              }).join(', ')}`,
         });
       }
 
@@ -653,6 +974,8 @@ export function executeTool(
       }
 
       case 'fillet': {
+        const filErr = validatePositive(input, 'radius');
+        if (filErr) return JSON.stringify({ success: false, error: filErr });
         const e = state.getEntity(input.entity_id);
         if (!e) {
           return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
@@ -660,16 +983,21 @@ export function executeTool(
         if (e.metadata.entityKind === 'sketch') {
           return JSON.stringify({ success: false, error: 'Fillet requires a 3D solid entity. Extrude sketches first.' });
         }
-        const filletedShape = filletAllEdges(oc, e.shape, input.radius);
+        const filFilter = (input.edge_filter as EdgeFilter) || 'all';
+        const filIndices = input.edge_indices as number[] | undefined;
+        const filletedShape = filletEdges(oc, e.shape, input.radius, filFilter, filIndices);
         state.replaceShape(input.entity_id, filletedShape);
+        const filterDesc = filIndices ? `edges [${filIndices.join(',')}]` : `${filFilter} edges`;
         return JSON.stringify({
           success: true,
           entity_id: input.entity_id,
-          description: `Filleted all edges of ${input.entity_id} with radius ${input.radius}"`,
+          description: `Filleted ${filterDesc} of ${input.entity_id} with radius ${input.radius}"`,
         });
       }
 
       case 'chamfer': {
+        const chamErr = validatePositive(input, 'distance');
+        if (chamErr) return JSON.stringify({ success: false, error: chamErr });
         const e = state.getEntity(input.entity_id);
         if (!e) {
           return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
@@ -677,12 +1005,15 @@ export function executeTool(
         if (e.metadata.entityKind === 'sketch') {
           return JSON.stringify({ success: false, error: 'Chamfer requires a 3D solid entity. Extrude sketches first.' });
         }
-        const chamferedShape = chamferAllEdges(oc, e.shape, input.distance);
+        const chamFilter = (input.edge_filter as EdgeFilter) || 'all';
+        const chamIndices = input.edge_indices as number[] | undefined;
+        const chamferedShape = chamferEdges(oc, e.shape, input.distance, chamFilter, chamIndices);
         state.replaceShape(input.entity_id, chamferedShape);
+        const chamFilterDesc = chamIndices ? `edges [${chamIndices.join(',')}]` : `${chamFilter} edges`;
         return JSON.stringify({
           success: true,
           entity_id: input.entity_id,
-          description: `Chamfered all edges of ${input.entity_id} with distance ${input.distance}"`,
+          description: `Chamfered ${chamFilterDesc} of ${input.entity_id} with distance ${input.distance}"`,
         });
       }
 
@@ -702,6 +1033,8 @@ export function executeTool(
       }
 
       case 'sketch_rectangle': {
+        const srErr = validatePositive(input, 'width', 'height');
+        if (srErr) return JSON.stringify({ success: false, error: srErr });
         const shape = createSketchRectangle(oc, input.x, input.y, input.width, input.height, input.z ?? 0);
         const entity = state.addEntity(
           `Rectangle ${input.width}×${input.height} at (${input.x},${input.y})`,
@@ -717,6 +1050,8 @@ export function executeTool(
       }
 
       case 'sketch_circle': {
+        const scErr = validatePositive(input, 'radius');
+        if (scErr) return JSON.stringify({ success: false, error: scErr });
         const shape = createSketchCircle(oc, input.center_x, input.center_y, input.radius, input.z ?? 0);
         const entity = state.addEntity(
           `Circle r=${input.radius} at (${input.center_x},${input.center_y})`,
@@ -746,7 +1081,108 @@ export function executeTool(
         });
       }
 
+      case 'sketch_line_relative': {
+        const x = input.x as number;
+        const y = input.y as number;
+        const dx = input.dx as number;
+        const dy = input.dy as number;
+        const z = (input.z ?? 0) as number;
+        const shape = createSketchLine(oc, x, y, x + dx, y + dy, z);
+        const entity = state.addEntity(
+          `Line (${x},${y})→(${x + dx},${y + dy})`,
+          'sketch_line',
+          shape,
+          { entityKind: 'sketch' }
+        );
+        return JSON.stringify({
+          success: true,
+          entity_id: entity.id,
+          end_point: { x: x + dx, y: y + dy },
+          description: `Created line from (${x}, ${y}) to (${x + dx}, ${y + dy}) [dx=${dx}, dy=${dy}] as ${entity.id}. End point: (${x + dx}, ${y + dy}).`,
+        });
+      }
+
+      case 'sketch_polyline': {
+        const pts = input.points as { x: number; y: number }[];
+        const closed = input.closed as boolean ?? false;
+        const z = (input.z ?? 0) as number;
+
+        if (pts.length < 2) {
+          return JSON.stringify({ success: false, error: 'Polyline requires at least 2 points' });
+        }
+        if (closed && pts.length < 3) {
+          return JSON.stringify({ success: false, error: 'Closed polyline requires at least 3 points' });
+        }
+
+        if (closed) {
+          // Create a closed face using createFlatProfile
+          const shape = createFlatProfile(oc, pts, z);
+          const entity = state.addEntity(
+            `Profile (${pts.length} pts)`,
+            'flat_profile',
+            shape,
+            { entityKind: 'sketch' }
+          );
+          return JSON.stringify({
+            success: true,
+            entity_id: entity.id,
+            point_count: pts.length,
+            description: `Created closed ${pts.length}-point profile as ${entity.id}. Closed face — can be extruded or exported to DXF.`,
+          });
+        } else {
+          // Create open polyline as individual connected edges in a compound
+          const compound = new oc.TopoDS_Compound();
+          const builder = new oc.BRep_Builder();
+          builder.MakeCompound(compound);
+
+          for (let i = 0; i < pts.length - 1; i++) {
+            const edge = createSketchLine(oc, pts[i].x, pts[i].y, pts[i + 1].x, pts[i + 1].y, z);
+            builder.Add(compound, edge);
+          }
+
+          const entity = state.addEntity(
+            `Polyline (${pts.length} pts)`,
+            'sketch_polyline',
+            compound,
+            { entityKind: 'sketch' }
+          );
+          return JSON.stringify({
+            success: true,
+            entity_id: entity.id,
+            point_count: pts.length,
+            segment_count: pts.length - 1,
+            description: `Created open polyline with ${pts.length} points (${pts.length - 1} segments) as ${entity.id}. Open geometry — cannot be extruded.`,
+          });
+        }
+      }
+
+      case 'create_flat_profile': {
+        const pts = input.points as { x: number; y: number }[];
+        const z = (input.z ?? 0) as number;
+        const profileName = (input.name as string) || 'flat profile';
+
+        if (pts.length < 3) {
+          return JSON.stringify({ success: false, error: 'Flat profile requires at least 3 points' });
+        }
+
+        const shape = createFlatProfile(oc, pts, z);
+        const entity = state.addEntity(
+          profileName,
+          'flat_profile',
+          shape,
+          { entityKind: 'sketch' }
+        );
+        return JSON.stringify({
+          success: true,
+          entity_id: entity.id,
+          point_count: pts.length,
+          description: `Created "${profileName}" flat profile with ${pts.length} points as ${entity.id}. Closed face — can be extruded into 3D or exported directly to DXF for plasma cutting.`,
+        });
+      }
+
       case 'extrude': {
+        const extErr = validatePositive(input, 'height');
+        if (extErr) return JSON.stringify({ success: false, error: extErr });
         const e = state.getEntity(input.entity_id);
         if (!e) {
           return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
@@ -816,18 +1252,20 @@ export function executeTool(
           if (bendLayered.length > 0) extraLayered = bendLayered;
         }
 
-        const result = exportDxf(oc, shapes, extraLayered);
+        const classify = input.classify_layers === true;
+        const result = exportDxf(oc, shapes, extraLayered, classify);
         const downloadUrl = entityId
           ? `/api/export/dxf?entity_id=${encodeURIComponent(entityId)}`
           : '/api/export/dxf';
 
         const bendNote = extraLayered?.length ? ` + ${extraLayered.length} bend line(s) on BEND layer` : '';
+        const layerNote = classify ? ' Layers: OUTSIDE (perimeter), INSIDE (holes).' : '';
         return JSON.stringify({
           success: true,
           download_url: downloadUrl,
           entity_count: result.entityCount,
           warnings: result.warnings,
-          description: `Exported ${label} to DXF (${result.entityCount} entities: lines, arcs, circles${bendNote}). Download: ${downloadUrl}${result.warnings.length > 0 ? '. Warnings: ' + result.warnings.join('; ') : ''}`,
+          description: `Exported ${label} to DXF (${result.entityCount} entities: lines, arcs, circles${bendNote}).${layerNote} Download: ${downloadUrl}${result.warnings.length > 0 ? '. Warnings: ' + result.warnings.join('; ') : ''}`,
         });
       }
 
@@ -862,6 +1300,43 @@ export function executeTool(
           download_url: downloadUrl,
           warnings: result.warnings,
           description: `Exported ${label} to STEP. Download: ${downloadUrl}${result.warnings.length > 0 ? '. Warnings: ' + result.warnings.join('; ') : ''}`,
+        });
+      }
+
+      case 'import_dxf': {
+        const dxfContent = input.content as string | undefined;
+        if (!dxfContent) {
+          return JSON.stringify({
+            success: false,
+            error: 'No DXF content provided. Ask the user to upload a DXF file using the upload button, or paste the DXF content directly.',
+          });
+        }
+
+        const parsed = parseDxf(dxfContent);
+        if (parsed.entities.length === 0) {
+          return JSON.stringify({
+            success: false,
+            error: 'No supported entities found in DXF file. Only LINE, ARC, CIRCLE, and LWPOLYLINE are supported.',
+            warnings: parsed.warnings,
+          });
+        }
+
+        const { shape, entityCount } = dxfToShapes(oc, parsed);
+        const entity = state.addEntity(
+          `DXF Import (${entityCount} entities)`,
+          'dxf_import',
+          shape,
+          { entityKind: 'sketch' as const, layers: parsed.layers }
+        );
+
+        return JSON.stringify({
+          success: true,
+          entity_id: entity.id,
+          entity_count: entityCount,
+          layers: parsed.layers,
+          warnings: parsed.warnings,
+          skipped: parsed.skipped,
+          description: `Imported DXF with ${entityCount} entities (${parsed.layers.join(', ')} layers) as ${entity.id}. ${parsed.skipped > 0 ? `Skipped ${parsed.skipped} unsupported entity types.` : ''} ${parsed.warnings.join('; ')}`.trim(),
         });
       }
 
@@ -1028,12 +1503,6 @@ export function executeTool(
           return JSON.stringify({ success: false, error: 'No bend lines defined. Use add_bend_line first.' });
         }
 
-        // V1: single-axis constraint
-        const axes = new Set(bends.map(b => b.axis));
-        if (axes.size > 1) {
-          return JSON.stringify({ success: false, error: 'V1 limitation: all bends must be on the same axis. Mixed X/Y bends are not yet supported.' });
-        }
-
         const foldedShape = buildFoldedShape(
           oc,
           e.metadata.plateWidth as number,
@@ -1041,21 +1510,22 @@ export function executeTool(
           e.metadata.thickness as number,
           e.metadata.innerBendRadius as number,
           e.metadata.kFactor as number,
-          bends
+          bends,
+          e.shape // pass source shape to propagate holes/cutouts
         );
 
-        const foldedEntity = state.addEntity(
-          `Folded ${e.name}`,
-          'sheet_metal_folded',
-          foldedShape,
-          { entityKind: 'solid', sourcePlateId: input.entity_id }
-        );
+        // Store flat shape in metadata so we can unfold later, then replace
+        e.metadata.flatShape = e.shape;
+        e.metadata.folded = true;
+        e.metadata.entityKind = 'solid';
+        e.name = `Folded ${e.name.replace(/^Folded /, '')}`;
+        e.type = 'sheet_metal_folded';
+        state.replaceShape(input.entity_id, foldedShape);
 
         return JSON.stringify({
           success: true,
-          entity_id: foldedEntity.id,
-          source_plate_id: input.entity_id,
-          description: `Created folded 3D preview as ${foldedEntity.id} (${bends.length} bend(s)). Original flat plate ${input.entity_id} is preserved.`,
+          entity_id: input.entity_id,
+          description: `Folded ${input.entity_id} with ${bends.length} bend(s). Use undo to get back to flat plate.`,
         });
       }
 
@@ -1144,6 +1614,8 @@ export function executeTool(
       }
 
       case 'cut_hole': {
+        const chErr = validatePositive(input, 'radius');
+        if (chErr) return JSON.stringify({ success: false, error: chErr });
         const e = state.getEntity(input.entity_id);
         if (!e) {
           return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
@@ -1328,6 +1800,484 @@ export function executeTool(
           success: true,
           entity_id: input.entity_id,
           description: `Cut ${input.count}-hole bolt circle (ø${input.hole_radius * 2}" holes, ${input.pattern_radius}" radius) at (${input.center_x}, ${input.center_y}) in ${input.entity_id}`,
+        });
+      }
+
+      case 'cut_bolt_hole': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (e.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: 'Cutout operations require a 3D solid entity. Extrude sketches first.' });
+        }
+
+        const fit = input.fit || 'standard';
+        const clearance = getBoltClearance(input.bolt_size, fit);
+        if (!clearance) {
+          const available = Object.keys(BOLT_CLEARANCE).join(', ');
+          return JSON.stringify({ success: false, error: `Unknown bolt size "${input.bolt_size}". Available sizes: ${available}` });
+        }
+
+        // Auto-detect depth from bounding box
+        const bboxBolt = new oc.Bnd_Box_1();
+        oc.BRepBndLib.Add(e.shape, bboxBolt, false);
+        const bMinBolt = bboxBolt.CornerMin();
+        const bMaxBolt = bboxBolt.CornerMax();
+        const zMinBolt = bMinBolt.Z(), zMaxBolt = bMaxBolt.Z();
+        const autoDepthBolt = input.depth ?? (zMaxBolt - zMinBolt);
+        bMinBolt.delete(); bMaxBolt.delete(); bboxBolt.delete();
+
+        const cutterBolt = createCylinder(oc, clearance.radius, autoDepthBolt + 0.01);
+        const positionedBolt = translateShape(oc, cutterBolt, input.center_x, input.center_y, zMaxBolt - autoDepthBolt - 0.005);
+        cutterBolt.delete();
+
+        const resultBolt = booleanSubtract(oc, e.shape, positionedBolt);
+        positionedBolt.delete();
+        state.replaceShape(input.entity_id, resultBolt);
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          description: `Cut ${input.bolt_size}" bolt clearance hole (${fit} fit, ø${clearance.diameter}") at (${input.center_x}, ${input.center_y}) in ${input.entity_id}`,
+        });
+      }
+
+      case 'measure_distance': {
+        const x1 = input.x1 ?? 0, y1 = input.y1 ?? 0, z1 = input.z1 ?? 0;
+        const x2 = input.x2 ?? 0, y2 = input.y2 ?? 0, z2 = input.z2 ?? 0;
+        const dx = (x2 as number) - (x1 as number);
+        const dy = (y2 as number) - (y1 as number);
+        const dz = (z2 as number) - (z1 as number);
+        const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+        const rounded = Math.round(dist * 10000) / 10000;
+        return JSON.stringify({
+          success: true,
+          distance: rounded,
+          dx: Math.round(Math.abs(dx) * 10000) / 10000,
+          dy: Math.round(Math.abs(dy) * 10000) / 10000,
+          dz: Math.round(Math.abs(dz) * 10000) / 10000,
+          description: `Distance from (${x1}, ${y1}, ${z1}) to (${x2}, ${y2}, ${z2}) = ${rounded}" (ΔX=${Math.abs(dx as number).toFixed(4)}", ΔY=${Math.abs(dy as number).toFixed(4)}", ΔZ=${Math.abs(dz as number).toFixed(4)}")`,
+        });
+      }
+
+      case 'measure_entity': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+
+        const measurements: Record<string, any> = { entity_id: input.entity_id, name: e.name };
+
+        // Bounding box dimensions
+        try {
+          const bbox = new oc.Bnd_Box_1();
+          oc.BRepBndLib.Add(e.shape, bbox, false);
+          const bMin = bbox.CornerMin();
+          const bMax = bbox.CornerMax();
+          const w = Math.round((bMax.X() - bMin.X()) * 10000) / 10000;
+          const h = Math.round((bMax.Y() - bMin.Y()) * 10000) / 10000;
+          const d = Math.round((bMax.Z() - bMin.Z()) * 10000) / 10000;
+          measurements.width = w;
+          measurements.height = h;
+          measurements.depth = d;
+          bMin.delete(); bMax.delete(); bbox.delete();
+        } catch { /* skip */ }
+
+        // Surface area
+        try {
+          const surfProps = new oc.GProp_GProps_1();
+          oc.BRepGProp.SurfaceProperties_1(e.shape, surfProps, false);
+          measurements.surfaceArea = Math.round(surfProps.Mass() * 10000) / 10000;
+          surfProps.delete();
+        } catch { /* skip */ }
+
+        // Volume
+        try {
+          const volProps = new oc.GProp_GProps_1();
+          oc.BRepGProp.VolumeProperties_1(e.shape, volProps, false);
+          measurements.volume = Math.round(volProps.Mass() * 10000) / 10000;
+          volProps.delete();
+        } catch { /* skip */ }
+
+        // Total edge length (cut length)
+        try {
+          const linProps = new oc.GProp_GProps_1();
+          oc.BRepGProp.LinearProperties(e.shape, linProps, false);
+          measurements.edgeLength = Math.round(linProps.Mass() * 10000) / 10000;
+          linProps.delete();
+        } catch { /* skip */ }
+
+        // Edge count (useful for selective fillet/chamfer)
+        try {
+          measurements.edgeCount = countEdges(oc, e.shape);
+        } catch { /* skip */ }
+
+        const parts: string[] = [];
+        if (measurements.width !== undefined) parts.push(`${measurements.width}" × ${measurements.height}" × ${measurements.depth}" (W×H×D)`);
+        if (measurements.surfaceArea !== undefined) parts.push(`surface area = ${measurements.surfaceArea} sq in`);
+        if (measurements.volume !== undefined) parts.push(`volume = ${measurements.volume} cu in`);
+        if (measurements.edgeLength !== undefined) parts.push(`cut length = ${measurements.edgeLength}"`);
+        if (measurements.edgeCount !== undefined) parts.push(`${measurements.edgeCount} edges`);
+
+        return JSON.stringify({
+          success: true,
+          ...measurements,
+          description: `${e.name} (${input.entity_id}): ${parts.join(', ')}`,
+        });
+      }
+
+      case 'save_template': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+
+        // Capture entity info for template
+        const templateData: PartTemplate = {
+          name: input.name as string,
+          description: (input.description as string) || '',
+          type: (e.type === 'flat_profile' ? 'flat_profile' : e.type.includes('sheet_metal') ? 'sheet_metal' : 'custom') as any,
+          parameters: {
+            entityType: e.type,
+            entityName: e.name,
+            metadata: JSON.parse(JSON.stringify(e.metadata)),
+          },
+          createdAt: '',
+          updatedAt: '',
+        };
+
+        // For flat profiles, store the points if available
+        // For boxes/cylinders, store dimensions from bounding box
+        try {
+          const bbox = new oc.Bnd_Box_1();
+          oc.BRepBndLib.Add(e.shape, bbox, false);
+          const bMin = bbox.CornerMin();
+          const bMax = bbox.CornerMax();
+          templateData.parameters.dimensions = {
+            width: Math.round((bMax.X() - bMin.X()) * 10000) / 10000,
+            height: Math.round((bMax.Y() - bMin.Y()) * 10000) / 10000,
+            depth: Math.round((bMax.Z() - bMin.Z()) * 10000) / 10000,
+          };
+          bMin.delete(); bMax.delete(); bbox.delete();
+        } catch { /* skip */ }
+
+        // Export DXF content as the portable representation
+        try {
+          const dxfResult = exportDxf(oc, [e.shape]);
+          templateData.parameters.dxfContent = dxfResult.dxfContent;
+        } catch { /* skip */ }
+
+        saveTemplate(templateData);
+        return JSON.stringify({
+          success: true,
+          template_name: input.name,
+          description: `Saved "${input.name}" as a reusable template. Use load_template to recreate it.`,
+        });
+      }
+
+      case 'load_template': {
+        const template = loadTemplate(input.name as string);
+        if (!template) {
+          const all = listTemplates();
+          const names = all.map(t => t.name).join(', ');
+          return JSON.stringify({
+            success: false,
+            error: `Template "${input.name}" not found. Available: ${names || 'none'}`,
+          });
+        }
+
+        // Recreate from DXF content if available
+        if (template.parameters.dxfContent) {
+          const parsed = parseDxf(template.parameters.dxfContent);
+          if (parsed.entities.length > 0) {
+            const { shape, entityCount } = dxfToShapes(oc, parsed);
+
+            // Apply offset if specified
+            let finalShape = shape;
+            const offX = (input.offset_x as number) || 0;
+            const offY = (input.offset_y as number) || 0;
+            if (offX !== 0 || offY !== 0) {
+              finalShape = translateShape(oc, shape, offX, offY, 0);
+              shape.delete();
+            }
+
+            const entity = state.addEntity(
+              template.name,
+              template.parameters.entityType || 'template',
+              finalShape,
+              { entityKind: 'sketch' as const, fromTemplate: template.name }
+            );
+
+            return JSON.stringify({
+              success: true,
+              entity_id: entity.id,
+              template_name: template.name,
+              entity_count: entityCount,
+              description: `Loaded template "${template.name}" as ${entity.id} (${entityCount} entities).`,
+            });
+          }
+        }
+
+        return JSON.stringify({
+          success: false,
+          error: `Template "${input.name}" has no geometry data. It may need to be re-saved.`,
+        });
+      }
+
+      case 'list_templates': {
+        const templates = listTemplates();
+        if (templates.length === 0) {
+          return JSON.stringify({
+            success: true,
+            templates: [],
+            description: 'No templates saved yet. Use save_template to save a part.',
+          });
+        }
+        const list = templates.map(t => ({
+          name: t.name,
+          description: t.description,
+          type: t.type,
+          dimensions: t.parameters.dimensions,
+          updatedAt: t.updatedAt,
+        }));
+        return JSON.stringify({
+          success: true,
+          templates: list,
+          description: `${templates.length} template(s): ${templates.map(t => `"${t.name}" (${t.type})`).join(', ')}`,
+        });
+      }
+
+      case 'delete_template': {
+        const deleted = deleteTemplate(input.name as string);
+        return JSON.stringify({
+          success: deleted,
+          description: deleted ? `Deleted template "${input.name}".` : `Template "${input.name}" not found.`,
+        });
+      }
+
+      case 'estimate_weight': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+
+        // Determine material type
+        const matType = (input.material_type || e.metadata.materialType || 'mild steel') as string;
+        const density = MATERIAL_DENSITY[matType];
+        if (!density) {
+          return JSON.stringify({ success: false, error: `Unknown material type: ${matType}. Use 'mild steel', 'stainless', or 'aluminum'.` });
+        }
+
+        // Get volume via GProp
+        try {
+          const volProps = new oc.GProp_GProps_1();
+          oc.BRepGProp.VolumeProperties_1(e.shape, volProps, false);
+          const volumeCuIn = volProps.Mass();
+          volProps.delete();
+
+          const weightLbs = Math.round(volumeCuIn * density * 1000) / 1000;
+          const weightOz = Math.round(weightLbs * 16 * 10) / 10;
+
+          return JSON.stringify({
+            success: true,
+            entity_id: input.entity_id,
+            material_type: matType,
+            density_lb_per_cu_in: density,
+            volume_cu_in: Math.round(volumeCuIn * 10000) / 10000,
+            weight_lbs: weightLbs,
+            weight_oz: weightOz,
+            description: `${e.name}: ${weightLbs} lbs (${weightOz} oz) — ${matType}, ${Math.round(volumeCuIn * 10000) / 10000} cu in`,
+          });
+        } catch (err: any) {
+          return JSON.stringify({ success: false, error: `Volume calculation failed: ${err.message || String(err)}` });
+        }
+      }
+
+      case 'estimate_cost': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+
+        const matType = (input.material_type || e.metadata.materialType || 'mild steel') as string;
+        const density = MATERIAL_DENSITY[matType];
+        if (!density) {
+          return JSON.stringify({ success: false, error: `Unknown material type: ${matType}` });
+        }
+
+        const matCostPerLb = input.material_cost_per_lb ?? MATERIAL_COST_PER_LB[matType] ?? 0.50;
+        const cutCostPerIn = input.cut_cost_per_inch ?? DEFAULT_CUT_COST_PER_INCH;
+        const qty = input.quantity ?? 1;
+
+        try {
+          // Volume for material cost
+          const volProps = new oc.GProp_GProps_1();
+          oc.BRepGProp.VolumeProperties_1(e.shape, volProps, false);
+          const volumeCuIn = volProps.Mass();
+          volProps.delete();
+          const weightLbs = volumeCuIn * density;
+          const materialCost = weightLbs * matCostPerLb;
+
+          // Edge length for cut cost
+          const linProps = new oc.GProp_GProps_1();
+          oc.BRepGProp.LinearProperties(e.shape, linProps, false);
+          const cutLengthIn = linProps.Mass();
+          linProps.delete();
+          const cutCost = cutLengthIn * cutCostPerIn;
+
+          const unitCost = materialCost + cutCost;
+          const totalCost = unitCost * qty;
+
+          return JSON.stringify({
+            success: true,
+            entity_id: input.entity_id,
+            material_type: matType,
+            weight_lbs: Math.round(weightLbs * 1000) / 1000,
+            cut_length_in: Math.round(cutLengthIn * 100) / 100,
+            material_cost: Math.round(materialCost * 100) / 100,
+            cut_cost: Math.round(cutCost * 100) / 100,
+            unit_cost: Math.round(unitCost * 100) / 100,
+            quantity: qty,
+            total_cost: Math.round(totalCost * 100) / 100,
+            rates: { material_per_lb: matCostPerLb, cut_per_inch: cutCostPerIn },
+            description: `${e.name}: $${(Math.round(unitCost * 100) / 100).toFixed(2)}/ea (material $${(Math.round(materialCost * 100) / 100).toFixed(2)} + cut $${(Math.round(cutCost * 100) / 100).toFixed(2)})${qty > 1 ? ` × ${qty} = $${(Math.round(totalCost * 100) / 100).toFixed(2)} total` : ''}`,
+          });
+        } catch (err: any) {
+          return JSON.stringify({ success: false, error: `Cost calculation failed: ${err.message || String(err)}` });
+        }
+      }
+
+      case 'nest_preview': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+
+        const sheetW = (input.sheet_width as number) || 48;
+        const sheetL = (input.sheet_length as number) || 96;
+        const spacing = (input.spacing as number) || 0.25;
+
+        // Get bounding box of the part
+        const bbox = new oc.Bnd_Box_1();
+        oc.BRepBndLib.Add(e.shape, bbox, false);
+        const bMin = bbox.CornerMin();
+        const bMax = bbox.CornerMax();
+        const partW = bMax.X() - bMin.X();
+        const partH = bMax.Y() - bMin.Y();
+        bMin.delete(); bMax.delete(); bbox.delete();
+
+        if (partW <= 0 || partH <= 0) {
+          return JSON.stringify({ success: false, error: 'Entity has zero-size bounding box' });
+        }
+
+        // Calculate axis-aligned nesting (no rotation)
+        const cellW = partW + spacing;
+        const cellH = partH + spacing;
+        const countX_noRot = Math.floor((sheetW + spacing) / cellW);
+        const countY_noRot = Math.floor((sheetL + spacing) / cellH);
+        const total_noRot = countX_noRot * countY_noRot;
+
+        // Also try 90° rotation
+        const cellWr = partH + spacing;
+        const cellHr = partW + spacing;
+        const countX_rot = Math.floor((sheetW + spacing) / cellWr);
+        const countY_rot = Math.floor((sheetL + spacing) / cellHr);
+        const total_rot = countX_rot * countY_rot;
+
+        const rotated = total_rot > total_noRot;
+        const bestTotal = Math.max(total_noRot, total_rot);
+        const bestCountX = rotated ? countX_rot : countX_noRot;
+        const bestCountY = rotated ? countY_rot : countY_noRot;
+        const usedW = rotated ? partH : partW;
+        const usedH = rotated ? partW : partH;
+
+        const partArea = partW * partH; // bounding box area (conservative)
+        const sheetArea = sheetW * sheetL;
+        const utilization = Math.round((bestTotal * partArea / sheetArea) * 1000) / 10;
+
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          sheet_size: `${sheetW}" × ${sheetL}"`,
+          part_size: `${Math.round(partW * 1000) / 1000}" × ${Math.round(partH * 1000) / 1000}"`,
+          rotated,
+          grid: `${bestCountX} × ${bestCountY}`,
+          total_parts: bestTotal,
+          spacing: spacing,
+          utilization_percent: utilization,
+          description: `${bestTotal} parts fit on ${sheetW}" × ${sheetL}" sheet (${bestCountX}×${bestCountY} grid${rotated ? ', rotated 90°' : ''}, ${spacing}" spacing). Part: ${Math.round(usedW * 1000) / 1000}" × ${Math.round(usedH * 1000) / 1000}". Material utilization: ${utilization}%.`,
+        });
+      }
+
+      case 'set_kerf': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+
+        const kerfWidth = input.kerf_width as number;
+        const cutSide = (input.cut_side as string) || 'centerline';
+
+        if (kerfWidth <= 0 || kerfWidth > 0.5) {
+          return JSON.stringify({ success: false, error: `Kerf width ${kerfWidth}" seems wrong. Typical plasma kerf is 0.04"–0.12".` });
+        }
+
+        e.metadata.kerfWidth = kerfWidth;
+        e.metadata.cutSide = cutSide;
+
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          kerf_width: kerfWidth,
+          cut_side: cutSide,
+          description: `Set kerf compensation on ${input.entity_id}: ${kerfWidth}" kerf, ${cutSide} cut. DXF export will use layer "${cutSide.toUpperCase()}_CUT" for this entity.`,
+        });
+      }
+
+      case 'set_custom_bend_table': {
+        const materialName = input.material_name as string;
+        const kFactor = input.k_factor as number;
+        const bendRadius = input.inner_bend_radius as number | undefined;
+
+        if (kFactor < 0.1 || kFactor > 0.9) {
+          return JSON.stringify({ success: false, error: `K-factor ${kFactor} is outside typical range (0.1–0.9). Are you sure?` });
+        }
+
+        // Verify material exists in DB
+        const mat = findMaterial(materialName);
+        if (!mat) {
+          return JSON.stringify({ success: false, error: `Material "${materialName}" not found in database.` });
+        }
+
+        setCustomBend(materialName, kFactor, bendRadius);
+
+        return JSON.stringify({
+          success: true,
+          material: materialName,
+          k_factor: kFactor,
+          inner_bend_radius: bendRadius ?? mat.inner_bend_radius,
+          description: `Set custom K-factor ${kFactor} for "${materialName}"${bendRadius ? ` with bend radius ${bendRadius}"` : ''}. This overrides the default (${mat.k_factor}).`,
+        });
+      }
+
+      case 'get_bend_table': {
+        const overrides = getAllBendOverrides();
+        const table = MATERIALS_DB.map(m => {
+          const override = overrides[m.name.toLowerCase().trim()];
+          return {
+            name: m.name,
+            material_type: m.material_type,
+            thickness: m.thickness,
+            k_factor: override?.k_factor ?? m.k_factor,
+            inner_bend_radius: override?.inner_bend_radius ?? m.inner_bend_radius,
+            custom: !!override,
+          };
+        });
+        const customCount = table.filter(t => t.custom).length;
+        return JSON.stringify({
+          success: true,
+          materials: table,
+          description: `Bend table: ${table.length} materials${customCount > 0 ? ` (${customCount} with custom overrides)` : ''}`,
         });
       }
 

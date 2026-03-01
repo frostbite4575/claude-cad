@@ -2,11 +2,13 @@ import type { OpenCascadeInstance } from './oc-init.js';
 
 export function translateShape(oc: OpenCascadeInstance, shape: any, x: number, y: number, z: number): any {
   const trsf = new oc.gp_Trsf_1();
-  trsf.SetTranslation_1(new oc.gp_Vec_4(x, y, z));
+  const vec = new oc.gp_Vec_4(x, y, z);
+  trsf.SetTranslation_1(vec);
   const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
   const result = transformer.Shape();
   transformer.delete();
   trsf.delete();
+  vec.delete();
   return result;
 }
 
@@ -18,10 +20,9 @@ export function rotateShape(
   axisZ: number,
   angleDeg: number
 ): any {
-  const axis = new oc.gp_Ax1_2(
-    new oc.gp_Pnt_3(0, 0, 0),
-    new oc.gp_Dir_4(axisX, axisY, axisZ)
-  );
+  const origin = new oc.gp_Pnt_3(0, 0, 0);
+  const dir = new oc.gp_Dir_4(axisX, axisY, axisZ);
+  const axis = new oc.gp_Ax1_2(origin, dir);
   const trsf = new oc.gp_Trsf_1();
   trsf.SetRotation_1(axis, (angleDeg * Math.PI) / 180);
   const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
@@ -29,6 +30,8 @@ export function rotateShape(
   transformer.delete();
   trsf.delete();
   axis.delete();
+  origin.delete();
+  dir.delete();
   return result;
 }
 
@@ -38,18 +41,17 @@ export function mirrorShape(
   plane: 'XY' | 'XZ' | 'YZ',
   offset: number = 0
 ): any {
-  // Build the mirror plane origin and normal based on plane choice
   let origin: any, normal: any;
   switch (plane) {
-    case 'YZ': // mirror across YZ plane (normal along X)
+    case 'YZ':
       origin = new oc.gp_Pnt_3(offset, 0, 0);
       normal = new oc.gp_Dir_4(1, 0, 0);
       break;
-    case 'XZ': // mirror across XZ plane (normal along Y)
+    case 'XZ':
       origin = new oc.gp_Pnt_3(0, offset, 0);
       normal = new oc.gp_Dir_4(0, 1, 0);
       break;
-    case 'XY': // mirror across XY plane (normal along Z)
+    case 'XY':
       origin = new oc.gp_Pnt_3(0, 0, offset);
       normal = new oc.gp_Dir_4(0, 0, 1);
       break;
@@ -67,6 +69,25 @@ export function mirrorShape(
   return result;
 }
 
+export function scaleShape(
+  oc: OpenCascadeInstance,
+  shape: any,
+  factor: number,
+  centerX: number = 0,
+  centerY: number = 0,
+  centerZ: number = 0
+): any {
+  const center = new oc.gp_Pnt_3(centerX, centerY, centerZ);
+  const trsf = new oc.gp_Trsf_1();
+  trsf.SetScale(center, factor);
+  const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
+  const result = transformer.Shape();
+  transformer.delete();
+  trsf.delete();
+  center.delete();
+  return result;
+}
+
 export function linearPatternCopies(
   oc: OpenCascadeInstance,
   shape: any,
@@ -78,11 +99,13 @@ export function linearPatternCopies(
   const copies: any[] = [];
   for (let i = 1; i <= count; i++) {
     const trsf = new oc.gp_Trsf_1();
-    trsf.SetTranslation_1(new oc.gp_Vec_4(i * sx, i * sy, i * sz));
+    const vec = new oc.gp_Vec_4(i * sx, i * sy, i * sz);
+    trsf.SetTranslation_1(vec);
     const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
     copies.push(transformer.Shape());
     transformer.delete();
     trsf.delete();
+    vec.delete();
   }
   return copies;
 }
@@ -100,7 +123,9 @@ export function circularPatternCopies(
   totalAngleDeg: number
 ): any[] {
   const copies: any[] = [];
-  const angleStep = totalAngleDeg / count;
+  // When full 360°, divide by (count+1) so last copy doesn't overlap the original
+  const isFullCircle = Math.abs(totalAngleDeg - 360) < 0.01;
+  const angleStep = isFullCircle ? 360 / (count + 1) : totalAngleDeg / count;
   const axisPt = new oc.gp_Pnt_3(cx, cy, cz);
   const axisDir = new oc.gp_Dir_4(ax, ay, az);
   const axis = new oc.gp_Ax1_2(axisPt, axisDir);
