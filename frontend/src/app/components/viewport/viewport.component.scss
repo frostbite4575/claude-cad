@@ -47,6 +47,20 @@ canvas {
     font-weight: bold;
     color: #88bbee;
     font-size: 13px;
+    cursor: default;
+  }
+
+  .prop-name-input {
+    flex: 1;
+    font-weight: bold;
+    color: #88bbee;
+    font-size: 13px;
+    font-family: inherit;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid #4488cc;
+    border-radius: 3px;
+    padding: 1px 4px;
+    outline: none;
   }
 
   .prop-close {
@@ -114,6 +128,55 @@ canvas {
         color: #ee8888;
       }
     }
+
+    &.small {
+      flex: 0;
+      padding: 4px 8px;
+    }
+  }
+
+  .extrude-input {
+    display: flex;
+    gap: 4px;
+    flex: 1;
+
+    input {
+      flex: 1;
+      width: 60px;
+      padding: 3px 6px;
+      border: 1px solid #3a3a5a;
+      border-radius: 4px;
+      background: rgba(0, 0, 0, 0.3);
+      color: #ddd;
+      font-family: inherit;
+      font-size: 11px;
+      outline: none;
+
+      &:focus {
+        border-color: #4488cc;
+      }
+    }
+  }
+}
+
+.dimension-label {
+  position: absolute;
+  font-family: 'Consolas', monospace;
+  font-size: 11px;
+  color: #ffdd44;
+  background: rgba(10, 10, 30, 0.85);
+  padding: 2px 6px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 221, 68, 0.3);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.1s;
+  white-space: nowrap;
+  z-index: 110;
+  transform: translate(12px, -50%);
+
+  &.visible {
+    opacity: 1;
   }
 }
 
@@ -154,6 +217,277 @@ canvas {
 
     &:hover {
       background: rgba(255, 255, 255, 0.1);
+    }
+  }
+
+  .grid-size {
+    margin-left: 8px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    pointer-events: auto;
+    font-size: 10px;
+    font-weight: bold;
+    background: rgba(255, 255, 255, 0.05);
+    color: #88bbee;
+    transition: color 0.15s, background 0.15s;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.1);
+      color: #bbddff;
+    }
+  }
+}
+
+.entity-list-toggle {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  width: 28px;
+  height: 28px;
+  border: 1px solid #3a3a5a;
+  border-radius: 4px;
+  background: rgba(20, 20, 40, 0.9);
+  color: #8888aa;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  transition: background 0.15s, color 0.15s;
+
+  &:hover {
+    background: rgba(40, 40, 80, 0.95);
+    color: #ccccee;
+  }
+}
+
+.entity-list {
+  position: absolute;
+  top: 48px;
+  left: 12px;
+  width: 180px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: rgba(20, 20, 40, 0.95);
+  border: 1px solid #2a2a4a;
+  border-radius: 6px;
+  padding: 6px 0;
+  font-family: 'Consolas', monospace;
+  font-size: 11px;
+  color: #ccc;
+  z-index: 100;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+
+  &.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .entity-list-title {
+    padding: 2px 10px 6px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #666;
+    border-bottom: 1px solid #2a2a4a;
+    margin-bottom: 4px;
+  }
+
+  .entity-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: background 0.1s;
+
+    &:hover {
+      background: rgba(255, 255, 255, 0.05);
+    }
+
+    &.selected {
+      background: rgba(34, 68, 170, 0.4);
+      color: #fff;
+    }
+  }
+
+  .entity-kind-badge {
+    font-size: 8px;
+    font-weight: bold;
+    padding: 1px 3px;
+    border-radius: 2px;
+    background: rgba(112, 144, 176, 0.3);
+    color: #88bbee;
+    min-width: 16px;
+    text-align: center;
+
+    &.sketch {
+      background: rgba(0, 229, 255, 0.15);
+      color: #00e5ff;
+    }
+  }
+
+  .entity-item-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+  }
+
+  .entity-eye {
+    margin-left: auto;
+    opacity: 0.4;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    transition: opacity 0.15s;
+
+    &:hover {
+      opacity: 1;
+    }
+
+    &.off {
+      opacity: 0.2;
+    }
+  }
+
+  .entity-item.hidden-entity .entity-item-name {
+    opacity: 0.4;
+    text-decoration: line-through;
+  }
+
+  .entity-list-empty {
+    padding: 8px 10px;
+    color: #555;
+    font-style: italic;
+  }
+}
+
+.help-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s;
+
+  &.visible {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .help-panel {
+    background: rgba(20, 20, 40, 0.97);
+    border: 1px solid #3a3a5a;
+    border-radius: 8px;
+    padding: 16px 24px;
+    font-family: 'Consolas', monospace;
+    font-size: 12px;
+    color: #ccc;
+    min-width: 260px;
+  }
+
+  .help-title {
+    font-size: 14px;
+    font-weight: bold;
+    color: #88bbee;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid #2a2a4a;
+  }
+
+  .help-section {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #666;
+    margin-top: 10px;
+    margin-bottom: 4px;
+  }
+
+  .help-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 2px 0;
+    color: #aaa;
+
+    kbd {
+      display: inline-block;
+      min-width: 60px;
+      padding: 1px 6px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid #3a3a5a;
+      border-radius: 3px;
+      font-family: inherit;
+      font-size: 11px;
+      color: #ddd;
+      text-align: center;
+    }
+  }
+}
+
+.measure-display {
+  position: absolute;
+  bottom: 40px;
+  left: 12px;
+  font-family: 'Consolas', monospace;
+  font-size: 12px;
+  color: #ff8800;
+  background: rgba(20, 20, 40, 0.9);
+  padding: 4px 10px;
+  border-radius: 3px;
+  border: 1px solid rgba(255, 136, 0, 0.3);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s;
+
+  &.visible {
+    opacity: 1;
+  }
+}
+
+.view-controls {
+  position: absolute;
+  bottom: 12px;
+  right: 12px;
+  display: flex;
+  gap: 4px;
+  z-index: 100;
+
+  .view-btn {
+    width: 28px;
+    height: 28px;
+    border: 1px solid #3a3a5a;
+    border-radius: 4px;
+    background: rgba(20, 20, 40, 0.9);
+    color: #8888aa;
+    font-family: 'Consolas', monospace;
+    font-size: 10px;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.15s, color 0.15s;
+
+    &:hover {
+      background: rgba(40, 40, 80, 0.95);
+      color: #ccccee;
+    }
+
+    &.fit {
+      width: 28px;
     }
   }
 }

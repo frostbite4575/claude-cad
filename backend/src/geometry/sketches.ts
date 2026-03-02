@@ -1,5 +1,36 @@
 import type { OpenCascadeInstance } from './oc-init.js';
 
+export type SketchPlane = 'XY' | 'XZ' | 'YZ';
+
+/**
+ * Transform a shape created on XY plane to another plane.
+ * XY: no-op. XZ: rotate -90° around X. YZ: rotate 90° around Z then -90° around X.
+ */
+export function transformToPlane(oc: OpenCascadeInstance, shape: any, plane: SketchPlane): any {
+  if (plane === 'XY') return shape;
+
+  const trsf = new oc.gp_Trsf_1();
+
+  if (plane === 'XZ') {
+    // Rotate -90° around X axis: Y→Z, Z→-Y (XY plane maps to XZ plane)
+    const ax = new oc.gp_Ax1_2(new oc.gp_Pnt_3(0, 0, 0), new oc.gp_Dir_4(1, 0, 0));
+    trsf.SetRotation_1(ax, -Math.PI / 2);
+    ax.delete();
+  } else if (plane === 'YZ') {
+    // Rotate 90° around Y axis: X→Z, Z→-X (XY plane maps to YZ plane)
+    const ax = new oc.gp_Ax1_2(new oc.gp_Pnt_3(0, 0, 0), new oc.gp_Dir_4(0, 1, 0));
+    trsf.SetRotation_1(ax, Math.PI / 2);
+    ax.delete();
+  }
+
+  const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
+  const result = transformer.Shape();
+  transformer.delete();
+  trsf.delete();
+
+  return result;
+}
+
 /**
  * Create a line edge (open geometry — cannot be extruded).
  */

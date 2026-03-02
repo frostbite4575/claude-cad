@@ -1,18 +1,22 @@
 import type { Tool } from '@anthropic-ai/sdk/resources/messages.js';
 import type { DocumentState } from '../state/document-state.js';
 import { getOC } from '../geometry/oc-init.js';
-import { createBox, createCylinder, createSphere, createPolygonExtrusion } from '../geometry/primitives.js';
-import { createSketchLine, createSketchRectangle, createSketchCircle, createSketchArc, createFlatProfile, extrudeShape } from '../geometry/sketches.js';
+import { createBox, createCylinder, createSphere, createPolygonExtrusion, revolveShape } from '../geometry/primitives.js';
+import { createSketchLine, createSketchRectangle, createSketchCircle, createSketchArc, createFlatProfile, extrudeShape, transformToPlane } from '../geometry/sketches.js';
+import type { SketchPlane } from '../geometry/sketches.js';
 import { booleanUnion, booleanSubtract, booleanIntersect } from '../geometry/booleans.js';
 import { translateShape, rotateShape, mirrorShape, scaleShape, linearPatternCopies, circularPatternCopies } from '../geometry/transforms.js';
 import { exportDxf, buildBendLineDxfEntities } from '../geometry/dxf-export.js';
 import { parseDxf, dxfToShapes } from '../geometry/dxf-import.js';
 import { exportStep } from '../geometry/step-export.js';
+import { exportStl } from '../geometry/stl-export.js';
+import { importStep } from '../geometry/step-import.js';
 import { filletAllEdges, filletEdges, chamferEdges, countEdges } from '../geometry/fillets.js';
 import type { EdgeFilter } from '../geometry/fillets.js';
 import { MATERIALS_DB, findMaterial, calculateBend, getBoltClearance, BOLT_CLEARANCE, setCustomBend, getAllBendOverrides, MATERIAL_DENSITY, MATERIAL_COST_PER_LB, DEFAULT_CUT_COST_PER_INCH } from '../materials/materials.js';
 import type { BendLine } from '../materials/materials.js';
 import { createFlatPlate, buildFoldedShape } from '../geometry/sheet-metal.js';
+import { shellShape, loftShapes, sweepShape } from '../geometry/advanced-ops.js';
 import type { UndoRedoManager } from '../state/undo-redo.js';
 import { saveTemplate, loadTemplate, listTemplates, deleteTemplate } from '../state/templates.js';
 import type { PartTemplate } from '../state/templates.js';
@@ -166,12 +170,49 @@ export const cadTools: Tool[] = [
     },
   },
   {
+    name: 'set_units',
+    description: 'Set the document unit system. All dimensions in tool inputs and outputs use these units. Default is inches. Changing units does NOT rescale existing geometry — it only changes how new dimensions are interpreted.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        units: { type: 'string', enum: ['inches', 'mm'], description: 'Unit system to use' },
+      },
+      required: ['units'],
+    },
+  },
+  {
     name: 'delete_entity',
     description: 'Remove an entity from the scene.',
     input_schema: {
       type: 'object' as const,
       properties: {
         entity_id: { type: 'string', description: 'Entity ID to delete' },
+      },
+      required: ['entity_id'],
+    },
+  },
+  {
+    name: 'rename_entity',
+    description: 'Rename an entity.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to rename' },
+        name: { type: 'string', description: 'New name for the entity' },
+      },
+      required: ['entity_id', 'name'],
+    },
+  },
+  {
+    name: 'duplicate_entity',
+    description: 'Duplicate an entity with an optional offset. Returns the new entity ID.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID to duplicate' },
+        offset_x: { type: 'number', description: 'X offset for the copy (default 1)' },
+        offset_y: { type: 'number', description: 'Y offset for the copy (default 0)' },
+        offset_z: { type: 'number', description: 'Z offset for the copy (default 0)' },
       },
       required: ['entity_id'],
     },
@@ -228,6 +269,17 @@ export const cadTools: Tool[] = [
     },
   },
   {
+    name: 'export_stl',
+    description: 'Export the scene (or a single entity) as an STL file for 3D printing. Returns a download URL. STL is a triangulated mesh format — no curves or parametric data.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Optional entity ID to export. If omitted, exports all entities.' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'import_dxf',
     description: 'Import a DXF file from a URL or file path. Creates sketch entities from the DXF content (LINE, ARC, CIRCLE, LWPOLYLINE). Use this when a user wants to load, view, or modify an existing DXF file. Note: the actual file upload happens via HTTP POST to /api/import/dxf — tell the user to drag and drop or use the upload button in the chat panel.',
     input_schema: {
@@ -239,8 +291,19 @@ export const cadTools: Tool[] = [
     },
   },
   {
+    name: 'import_step',
+    description: 'Import a STEP file. Creates solid entities from the STEP content. The actual file upload happens via HTTP POST to /api/import/step — tell the user to drag and drop or use the upload button.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        content: { type: 'string', description: 'STEP file content as a string (if provided directly)' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'sketch_line',
-    description: 'Draw a 2D line segment on the XY plane. Open geometry — cannot be extruded. Coordinates in inches.',
+    description: 'Draw a 2D line segment. Open geometry — cannot be extruded. Coordinates in the sketch plane\'s 2D coordinate system.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -248,14 +311,15 @@ export const cadTools: Tool[] = [
         y1: { type: 'number', description: 'Start Y in inches' },
         x2: { type: 'number', description: 'End X in inches' },
         y2: { type: 'number', description: 'End Y in inches' },
-        z: { type: 'number', description: 'Z plane (default 0)' },
+        z: { type: 'number', description: 'Z offset (default 0)' },
+        plane: { type: 'string', enum: ['XY', 'XZ', 'YZ'], description: 'Sketch plane (default XY)' },
       },
       required: ['x1', 'y1', 'x2', 'y2'],
     },
   },
   {
     name: 'sketch_rectangle',
-    description: 'Draw a 2D rectangle on the XY plane. Creates a closed face that can be extruded into a solid. (x, y) is the bottom-left corner. Dimensions in inches.',
+    description: 'Draw a 2D rectangle. Creates a closed face that can be extruded into a solid. (x, y) is the bottom-left corner. Dimensions in inches.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -263,28 +327,30 @@ export const cadTools: Tool[] = [
         y: { type: 'number', description: 'Corner Y in inches' },
         width: { type: 'number', description: 'Width (along X) in inches' },
         height: { type: 'number', description: 'Height (along Y) in inches' },
-        z: { type: 'number', description: 'Z plane (default 0)' },
+        z: { type: 'number', description: 'Z offset (default 0)' },
+        plane: { type: 'string', enum: ['XY', 'XZ', 'YZ'], description: 'Sketch plane (default XY)' },
       },
       required: ['x', 'y', 'width', 'height'],
     },
   },
   {
     name: 'sketch_circle',
-    description: 'Draw a 2D circle on the XY plane. Creates a closed face that can be extruded into a solid. Dimensions in inches.',
+    description: 'Draw a 2D circle. Creates a closed face that can be extruded into a solid. Dimensions in inches.',
     input_schema: {
       type: 'object' as const,
       properties: {
         center_x: { type: 'number', description: 'Center X in inches' },
         center_y: { type: 'number', description: 'Center Y in inches' },
         radius: { type: 'number', description: 'Radius in inches' },
-        z: { type: 'number', description: 'Z plane (default 0)' },
+        z: { type: 'number', description: 'Z offset (default 0)' },
+        plane: { type: 'string', enum: ['XY', 'XZ', 'YZ'], description: 'Sketch plane (default XY)' },
       },
       required: ['center_x', 'center_y', 'radius'],
     },
   },
   {
     name: 'sketch_arc',
-    description: 'Draw a 2D arc on the XY plane. Open geometry — cannot be extruded. Angles in degrees, measured counter-clockwise from the +X axis.',
+    description: 'Draw a 2D arc. Open geometry — cannot be extruded. Angles in degrees, measured counter-clockwise from the +X axis.',
     input_schema: {
       type: 'object' as const,
       properties: {
@@ -293,7 +359,8 @@ export const cadTools: Tool[] = [
         radius: { type: 'number', description: 'Radius in inches' },
         start_angle: { type: 'number', description: 'Start angle in degrees' },
         end_angle: { type: 'number', description: 'End angle in degrees' },
-        z: { type: 'number', description: 'Z plane (default 0)' },
+        z: { type: 'number', description: 'Z offset (default 0)' },
+        plane: { type: 'string', enum: ['XY', 'XZ', 'YZ'], description: 'Sketch plane (default XY)' },
       },
       required: ['center_x', 'center_y', 'radius', 'start_angle', 'end_angle'],
     },
@@ -374,6 +441,66 @@ export const cadTools: Tool[] = [
         direction_z: { type: 'number', description: 'Z component of extrusion direction (default 1)' },
       },
       required: ['entity_id', 'height'],
+    },
+  },
+  {
+    name: 'revolve',
+    description: 'Revolve a 2D sketch face around an axis to create a solid of revolution. Great for vases, turned parts, bushings, rings, pulleys, etc. Only works on closed sketch entities. The sketch is replaced by the resulting solid.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the sketch face to revolve' },
+        angle_deg: { type: 'number', description: 'Revolution angle in degrees (default: 360 for full revolution)' },
+        axis_point_x: { type: 'number', description: 'X coordinate of a point on the revolution axis (default: 0)' },
+        axis_point_y: { type: 'number', description: 'Y coordinate of a point on the revolution axis (default: 0)' },
+        axis_point_z: { type: 'number', description: 'Z coordinate of a point on the revolution axis (default: 0)' },
+        axis_dir_x: { type: 'number', description: 'X component of axis direction (default: 0)' },
+        axis_dir_y: { type: 'number', description: 'Y component of axis direction (default: 1, i.e. Y axis)' },
+        axis_dir_z: { type: 'number', description: 'Z component of axis direction (default: 0)' },
+      },
+      required: ['entity_id'],
+    },
+  },
+  {
+    name: 'shell',
+    description: 'Hollow out a solid, turning it into a thin-walled shell. Removes the top face by default. Wall thickness in inches. Use for enclosures, boxes, containers, etc. Only works on 3D solids.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_id: { type: 'string', description: 'Entity ID of the solid to shell' },
+        wall_thickness: { type: 'number', description: 'Wall thickness in inches (positive = outward offset, negative = inward offset)' },
+        remove_face: { type: 'string', enum: ['top', 'bottom'], description: 'Which face to remove/open (default: top)' },
+      },
+      required: ['entity_id', 'wall_thickness'],
+    },
+  },
+  {
+    name: 'loft',
+    description: 'Create a solid by lofting (blending) between two or more sketch profiles. The profiles must be closed sketches. They are connected in the order given to form a smooth transitional shape. Great for organic shapes, transitions, funnels, etc.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        entity_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Array of entity IDs of sketch profiles to loft between (minimum 2). Order matters — profiles are connected in sequence.',
+          minItems: 2,
+        },
+        solid: { type: 'boolean', description: 'True to create a solid (default), false for a shell surface' },
+      },
+      required: ['entity_ids'],
+    },
+  },
+  {
+    name: 'sweep',
+    description: 'Sweep a closed sketch profile along a path (spine) to create a solid. The profile is the cross-section shape, and the spine defines the path it follows. Great for pipes, channels, rails, custom extrusions along curves.',
+    input_schema: {
+      type: 'object' as const,
+      properties: {
+        profile_id: { type: 'string', description: 'Entity ID of the sketch profile (cross-section) to sweep' },
+        spine_id: { type: 'string', description: 'Entity ID of the sketch path (spine) to sweep along — can be a line or arc' },
+      },
+      required: ['profile_id', 'spine_id'],
     },
   },
   {
@@ -938,24 +1065,41 @@ export function executeTool(
         });
       }
 
-      case 'get_scene_info': {
-        const info = state.getSceneInfo();
+      case 'set_units': {
+        const newUnits = input.units as 'inches' | 'mm';
+        const oldUnits = state.getUnits();
+        state.setUnits(newUnits);
         return JSON.stringify({
           success: true,
+          previous_units: oldUnits,
+          current_units: newUnits,
+          description: `Units changed from ${oldUnits} to ${newUnits}. All new dimensions will be interpreted in ${newUnits}. Existing geometry was NOT rescaled.`,
+        });
+      }
+
+      case 'get_scene_info': {
+        const info = state.getSceneInfo();
+        const u = state.getUnits();
+        const uLabel = u === 'mm' ? 'mm' : 'in';
+        const uSqLabel = u === 'mm' ? 'sq mm' : 'sq in';
+        const uCuLabel = u === 'mm' ? 'cu mm' : 'cu in';
+        return JSON.stringify({
+          success: true,
+          units: u,
           entities: info.map(e => ({
             ...e,
-            surfaceArea: e.surfaceArea ? `${e.surfaceArea} sq in` : undefined,
-            volume: e.volume ? `${e.volume} cu in` : undefined,
-            edgeLength: e.edgeLength ? `${e.edgeLength} in (cut length)` : undefined,
+            surfaceArea: e.surfaceArea ? `${e.surfaceArea} ${uSqLabel}` : undefined,
+            volume: e.volume ? `${e.volume} ${uCuLabel}` : undefined,
+            edgeLength: e.edgeLength ? `${e.edgeLength} ${uLabel} (cut length)` : undefined,
           })),
           description: info.length === 0
-            ? 'Scene is empty'
-            : `Scene contains ${info.length} entity(ies): ${info.map((e) => {
+            ? `Scene is empty (units: ${u})`
+            : `Scene (units: ${u}) contains ${info.length} entity(ies): ${info.map((e) => {
                 let desc = `${e.id} (${e.name})`;
                 const details: string[] = [];
-                if (e.surfaceArea) details.push(`area=${e.surfaceArea} sq in`);
-                if (e.volume) details.push(`vol=${e.volume} cu in`);
-                if (e.edgeLength) details.push(`cut=${e.edgeLength} in`);
+                if (e.surfaceArea) details.push(`area=${e.surfaceArea} ${uSqLabel}`);
+                if (e.volume) details.push(`vol=${e.volume} ${uCuLabel}`);
+                if (e.edgeLength) details.push(`cut=${e.edgeLength} ${uLabel}`);
                 if (details.length) desc += ` [${details.join(', ')}]`;
                 return desc;
               }).join(', ')}`,
@@ -970,6 +1114,33 @@ export function executeTool(
         return JSON.stringify({
           success: true,
           description: `Deleted ${input.entity_id}`,
+        });
+      }
+
+      case 'rename_entity': {
+        const renamed = state.renameEntity(input.entity_id, input.name);
+        if (!renamed) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        return JSON.stringify({ success: true, description: `Renamed ${input.entity_id} to "${input.name}"` });
+      }
+
+      case 'duplicate_entity': {
+        const srcEntity = state.getEntity(input.entity_id);
+        if (!srcEntity) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        const offsetX = input.offset_x ?? 1;
+        const offsetY = input.offset_y ?? 0;
+        const offsetZ = input.offset_z ?? 0;
+        // Clone shape via translate
+        const copiedShape = translateShape(oc, srcEntity.shape, offsetX, offsetY, offsetZ);
+        const copyMeta = { ...srcEntity.metadata };
+        const dupEntity = state.addEntity(`${srcEntity.name} (copy)`, srcEntity.type, copiedShape, copyMeta);
+        return JSON.stringify({
+          success: true,
+          entity_id: dupEntity.id,
+          description: `Duplicated ${input.entity_id} → ${dupEntity.id} at offset (${offsetX}, ${offsetY}, ${offsetZ})`,
         });
       }
 
@@ -1018,66 +1189,74 @@ export function executeTool(
       }
 
       case 'sketch_line': {
-        const shape = createSketchLine(oc, input.x1, input.y1, input.x2, input.y2, input.z ?? 0);
+        const plane = (input.plane as SketchPlane) || 'XY';
+        let shape = createSketchLine(oc, input.x1, input.y1, input.x2, input.y2, input.z ?? 0);
+        shape = transformToPlane(oc, shape, plane);
         const entity = state.addEntity(
           `Line (${input.x1},${input.y1})→(${input.x2},${input.y2})`,
           'sketch_line',
           shape,
-          { entityKind: 'sketch' }
+          { entityKind: 'sketch', plane }
         );
         return JSON.stringify({
           success: true,
           entity_id: entity.id,
-          description: `Created line from (${input.x1}, ${input.y1}) to (${input.x2}, ${input.y2}) as ${entity.id}. Open geometry — cannot be extruded.`,
+          description: `Created line from (${input.x1}, ${input.y1}) to (${input.x2}, ${input.y2}) on ${plane} plane as ${entity.id}. Open geometry — cannot be extruded.`,
         });
       }
 
       case 'sketch_rectangle': {
         const srErr = validatePositive(input, 'width', 'height');
         if (srErr) return JSON.stringify({ success: false, error: srErr });
-        const shape = createSketchRectangle(oc, input.x, input.y, input.width, input.height, input.z ?? 0);
+        const plane = (input.plane as SketchPlane) || 'XY';
+        let shape = createSketchRectangle(oc, input.x, input.y, input.width, input.height, input.z ?? 0);
+        shape = transformToPlane(oc, shape, plane);
         const entity = state.addEntity(
           `Rectangle ${input.width}×${input.height} at (${input.x},${input.y})`,
           'sketch_rectangle',
           shape,
-          { entityKind: 'sketch' }
+          { entityKind: 'sketch', plane }
         );
         return JSON.stringify({
           success: true,
           entity_id: entity.id,
-          description: `Created ${input.width}" × ${input.height}" rectangle at (${input.x}, ${input.y}) as ${entity.id}. Closed face — can be extruded.`,
+          description: `Created ${input.width}" × ${input.height}" rectangle at (${input.x}, ${input.y}) on ${plane} plane as ${entity.id}. Closed face — can be extruded.`,
         });
       }
 
       case 'sketch_circle': {
         const scErr = validatePositive(input, 'radius');
         if (scErr) return JSON.stringify({ success: false, error: scErr });
-        const shape = createSketchCircle(oc, input.center_x, input.center_y, input.radius, input.z ?? 0);
+        const plane = (input.plane as SketchPlane) || 'XY';
+        let shape = createSketchCircle(oc, input.center_x, input.center_y, input.radius, input.z ?? 0);
+        shape = transformToPlane(oc, shape, plane);
         const entity = state.addEntity(
           `Circle r=${input.radius} at (${input.center_x},${input.center_y})`,
           'sketch_circle',
           shape,
-          { entityKind: 'sketch' }
+          { entityKind: 'sketch', plane }
         );
         return JSON.stringify({
           success: true,
           entity_id: entity.id,
-          description: `Created circle radius ${input.radius}" at (${input.center_x}, ${input.center_y}) as ${entity.id}. Closed face — can be extruded.`,
+          description: `Created circle radius ${input.radius}" at (${input.center_x}, ${input.center_y}) on ${plane} plane as ${entity.id}. Closed face — can be extruded.`,
         });
       }
 
       case 'sketch_arc': {
-        const shape = createSketchArc(oc, input.center_x, input.center_y, input.radius, input.start_angle, input.end_angle, input.z ?? 0);
+        const plane = (input.plane as SketchPlane) || 'XY';
+        let shape = createSketchArc(oc, input.center_x, input.center_y, input.radius, input.start_angle, input.end_angle, input.z ?? 0);
+        shape = transformToPlane(oc, shape, plane);
         const entity = state.addEntity(
           `Arc r=${input.radius} ${input.start_angle}°–${input.end_angle}°`,
           'sketch_arc',
           shape,
-          { entityKind: 'sketch' }
+          { entityKind: 'sketch', plane }
         );
         return JSON.stringify({
           success: true,
           entity_id: entity.id,
-          description: `Created arc radius ${input.radius}" from ${input.start_angle}° to ${input.end_angle}° at (${input.center_x}, ${input.center_y}) as ${entity.id}. Open geometry — cannot be extruded.`,
+          description: `Created arc radius ${input.radius}" from ${input.start_angle}° to ${input.end_angle}° at (${input.center_x}, ${input.center_y}) on ${plane} plane as ${entity.id}. Open geometry — cannot be extruded.`,
         });
       }
 
@@ -1208,6 +1387,155 @@ export function executeTool(
         });
       }
 
+      case 'revolve': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (e.metadata.entityKind !== 'sketch') {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} is already a solid — revolve only works on sketch faces.` });
+        }
+        if (e.type === 'sketch_line' || e.type === 'sketch_arc') {
+          return JSON.stringify({ success: false, error: `Cannot revolve an open ${e.type}. Only closed sketches (rectangles, circles) can be revolved.` });
+        }
+        const angleDeg = (input.angle_deg as number) ?? 360;
+        const apx = (input.axis_point_x as number) ?? 0;
+        const apy = (input.axis_point_y as number) ?? 0;
+        const apz = (input.axis_point_z as number) ?? 0;
+        const adx = (input.axis_dir_x as number) ?? 0;
+        const ady = (input.axis_dir_y as number) ?? 1;
+        const adz = (input.axis_dir_z as number) ?? 0;
+        if (adx === 0 && ady === 0 && adz === 0) {
+          return JSON.stringify({ success: false, error: 'Axis direction cannot be zero vector.' });
+        }
+        const revolved = revolveShape(oc, e.shape, apx, apy, apz, adx, ady, adz, angleDeg);
+        state.replaceShape(input.entity_id, revolved);
+        e.name = `Revolved ${e.name} ${angleDeg}°`;
+        e.type = 'revolution';
+        e.metadata.entityKind = 'solid';
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          angle_deg: angleDeg,
+          description: `Revolved ${input.entity_id} by ${angleDeg}° around axis → now a 3D solid.`,
+        });
+      }
+
+      case 'shell': {
+        const e = state.getEntity(input.entity_id);
+        if (!e) {
+          return JSON.stringify({ success: false, error: `Entity ${input.entity_id} not found` });
+        }
+        if (e.metadata.entityKind === 'sketch') {
+          return JSON.stringify({ success: false, error: `Cannot shell a sketch. Shell only works on 3D solids.` });
+        }
+        const wallThickness = input.wall_thickness as number;
+        if (wallThickness === 0) {
+          return JSON.stringify({ success: false, error: 'Wall thickness cannot be zero.' });
+        }
+        // Find the face to remove
+        const removeFace = (input.remove_face as string) || 'top';
+        let targetFace: any = null;
+        const faceExplorer = new oc.TopExp_Explorer_2(e.shape, oc.TopAbs_ShapeEnum.TopAbs_FACE, oc.TopAbs_ShapeEnum.TopAbs_SHAPE);
+        let bestZ = removeFace === 'top' ? -Infinity : Infinity;
+        while (faceExplorer.More()) {
+          const face = oc.TopoDS.Face_1(faceExplorer.Current());
+          const props = new oc.GProp_GProps_1();
+          oc.BRepGProp.SurfaceProperties(face, props, false);
+          const centroid = props.CentreOfMass();
+          const z = centroid.Z();
+          centroid.delete();
+          props.delete();
+          if ((removeFace === 'top' && z > bestZ) || (removeFace === 'bottom' && z < bestZ)) {
+            bestZ = z;
+            if (targetFace) targetFace.delete();
+            targetFace = face;
+          } else {
+            face.delete();
+          }
+          faceExplorer.Next();
+        }
+        faceExplorer.delete();
+        if (!targetFace) {
+          return JSON.stringify({ success: false, error: 'Could not find a face to remove.' });
+        }
+        const shelled = shellShape(oc, e.shape, wallThickness, [targetFace]);
+        targetFace.delete();
+        state.replaceShape(input.entity_id, shelled);
+        e.name = `Shelled ${e.name}`;
+        e.type = 'shell';
+        return JSON.stringify({
+          success: true,
+          entity_id: input.entity_id,
+          wall_thickness: wallThickness,
+          description: `Shelled ${input.entity_id} with ${wallThickness}" wall thickness (${removeFace} face removed).`,
+        });
+      }
+
+      case 'loft': {
+        const entityIds = input.entity_ids as string[];
+        if (!entityIds || entityIds.length < 2) {
+          return JSON.stringify({ success: false, error: 'Loft requires at least 2 profile entity IDs.' });
+        }
+        const profiles: any[] = [];
+        for (const id of entityIds) {
+          const e = state.getEntity(id);
+          if (!e) {
+            return JSON.stringify({ success: false, error: `Entity ${id} not found` });
+          }
+          if (e.metadata.entityKind !== 'sketch') {
+            return JSON.stringify({ success: false, error: `Entity ${id} is not a sketch. Loft requires sketch profiles.` });
+          }
+          if (e.type === 'sketch_line' || e.type === 'sketch_arc') {
+            return JSON.stringify({ success: false, error: `Cannot loft an open ${e.type}. Only closed sketches can be used as loft profiles.` });
+          }
+          profiles.push(e.shape);
+        }
+        const isSolid = input.solid !== false;
+        const lofted = loftShapes(oc, profiles, isSolid);
+        // Remove source profiles and add the lofted result
+        for (const id of entityIds) {
+          state.removeEntity(id);
+        }
+        const loftId = state.addEntity(lofted, 'loft', `Loft (${entityIds.length} profiles)`, { entityKind: 'solid' });
+        return JSON.stringify({
+          success: true,
+          entity_id: loftId,
+          profiles: entityIds.length,
+          description: `Lofted ${entityIds.length} profiles into a ${isSolid ? 'solid' : 'shell'} → ${loftId}.`,
+        });
+      }
+
+      case 'sweep': {
+        const profileEntity = state.getEntity(input.profile_id);
+        if (!profileEntity) {
+          return JSON.stringify({ success: false, error: `Profile entity ${input.profile_id} not found` });
+        }
+        const spineEntity = state.getEntity(input.spine_id);
+        if (!spineEntity) {
+          return JSON.stringify({ success: false, error: `Spine entity ${input.spine_id} not found` });
+        }
+        if (profileEntity.metadata.entityKind !== 'sketch') {
+          return JSON.stringify({ success: false, error: `Profile ${input.profile_id} is not a sketch.` });
+        }
+        if (profileEntity.type === 'sketch_line' || profileEntity.type === 'sketch_arc') {
+          // Lines/arcs can be spines but not profiles... unless it's the spine
+        }
+        if (spineEntity.metadata.entityKind !== 'sketch') {
+          return JSON.stringify({ success: false, error: `Spine ${input.spine_id} is not a sketch path.` });
+        }
+        const swept = sweepShape(oc, profileEntity.shape, spineEntity.shape);
+        // Remove source entities
+        state.removeEntity(input.profile_id as string);
+        state.removeEntity(input.spine_id as string);
+        const sweepId = state.addEntity(swept, 'sweep', `Sweep`, { entityKind: 'solid' });
+        return JSON.stringify({
+          success: true,
+          entity_id: sweepId,
+          description: `Swept profile ${input.profile_id} along spine ${input.spine_id} → ${sweepId}.`,
+        });
+      }
+
       case 'export_dxf': {
         const entityId = input.entity_id as string | undefined;
         let shapes: any[];
@@ -1303,6 +1631,40 @@ export function executeTool(
         });
       }
 
+      case 'export_stl': {
+        const stlEntityId = input.entity_id as string | undefined;
+        let stlShapes: any[];
+        let stlLabel: string;
+
+        if (stlEntityId) {
+          const entity = state.getEntity(stlEntityId);
+          if (!entity) {
+            return JSON.stringify({ success: false, error: `Entity ${stlEntityId} not found` });
+          }
+          stlShapes = [entity.shape];
+          stlLabel = stlEntityId;
+        } else {
+          const allEntities = state.getAllEntities();
+          if (allEntities.length === 0) {
+            return JSON.stringify({ success: false, error: 'Scene is empty — nothing to export' });
+          }
+          stlShapes = allEntities.map((e) => e.shape);
+          stlLabel = `${allEntities.length} entity(ies)`;
+        }
+
+        const stlResult = exportStl(oc, stlShapes);
+        const stlDownloadUrl = stlEntityId
+          ? `/api/export/stl?entity_id=${encodeURIComponent(stlEntityId)}`
+          : '/api/export/stl';
+
+        return JSON.stringify({
+          success: true,
+          download_url: stlDownloadUrl,
+          warnings: stlResult.warnings,
+          description: `Exported ${stlLabel} to STL for 3D printing. Download: ${stlDownloadUrl}${stlResult.warnings.length > 0 ? '. Warnings: ' + stlResult.warnings.join('; ') : ''}`,
+        });
+      }
+
       case 'import_dxf': {
         const dxfContent = input.content as string | undefined;
         if (!dxfContent) {
@@ -1337,6 +1699,44 @@ export function executeTool(
           warnings: parsed.warnings,
           skipped: parsed.skipped,
           description: `Imported DXF with ${entityCount} entities (${parsed.layers.join(', ')} layers) as ${entity.id}. ${parsed.skipped > 0 ? `Skipped ${parsed.skipped} unsupported entity types.` : ''} ${parsed.warnings.join('; ')}`.trim(),
+        });
+      }
+
+      case 'import_step': {
+        const stepContent = input.content as string | undefined;
+        if (!stepContent) {
+          return JSON.stringify({
+            success: false,
+            error: 'No STEP content provided. Ask the user to upload a STEP file using the upload button.',
+          });
+        }
+
+        const stepResult = importStep(oc, stepContent);
+        if (stepResult.shapes.length === 0) {
+          return JSON.stringify({
+            success: false,
+            error: 'STEP file was read but produced no shapes.',
+            warnings: stepResult.warnings,
+          });
+        }
+
+        const importedIds: string[] = [];
+        for (let i = 0; i < stepResult.shapes.length; i++) {
+          const entity = state.addEntity(
+            `STEP Import ${i + 1}`,
+            'step_import',
+            stepResult.shapes[i],
+            { entityKind: 'solid' as const }
+          );
+          importedIds.push(entity.id);
+        }
+
+        return JSON.stringify({
+          success: true,
+          entity_ids: importedIds,
+          shape_count: stepResult.shapes.length,
+          warnings: stepResult.warnings,
+          description: `Imported STEP file: ${stepResult.shapes.length} shape(s) → ${importedIds.join(', ')}. ${stepResult.warnings.join('; ')}`.trim(),
         });
       }
 

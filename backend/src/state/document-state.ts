@@ -11,17 +11,28 @@ export interface Entity {
   metadata: Record<string, unknown>;
 }
 
+export type UnitSystem = 'inches' | 'mm';
+
 export class DocumentState {
   private entities = new Map<string, Entity>();
   private nextId = 1;
   private oc: OpenCascadeInstance;
   private selectedEntityId: string | null = null;
+  private units: UnitSystem = 'inches';
   // Tessellation cache: keyed by entity ID, invalidated on shape changes
   private tessCache = new Map<string, TessellatedMesh>();
   private entityVersions = new Map<string, number>();
 
   constructor(oc: OpenCascadeInstance) {
     this.oc = oc;
+  }
+
+  getUnits(): UnitSystem {
+    return this.units;
+  }
+
+  setUnits(units: UnitSystem): void {
+    this.units = units;
   }
 
   getSelectedEntityId(): string | null {
@@ -44,8 +55,23 @@ export class DocumentState {
     return entity;
   }
 
+  /** Add entity with a specific ID (used for project load to restore original IDs). */
+  addEntityWithId(id: string, name: string, type: string, shape: any, metadata: Record<string, unknown> = {}): Entity {
+    const entity: Entity = { id, name, type, shape, metadata };
+    this.entities.set(id, entity);
+    this.invalidateTessCache(id);
+    return entity;
+  }
+
   getEntity(id: string): Entity | undefined {
     return this.entities.get(id);
+  }
+
+  renameEntity(id: string, newName: string): boolean {
+    const entity = this.entities.get(id);
+    if (!entity) return false;
+    entity.name = newName;
+    return true;
   }
 
   // No longer calls shape.delete() — undo stack owns displaced shapes

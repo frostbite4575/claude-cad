@@ -74,3 +74,31 @@ export function createPolygonExtrusion(
 
   return solid;
 }
+
+/**
+ * Revolve a shape (sketch face or solid) around an axis.
+ * axisPoint: point on the axis, axisDir: direction of the axis.
+ * angleDeg: angle of revolution in degrees (360 = full revolution).
+ */
+export function revolveShape(
+  oc: OpenCascadeInstance,
+  shape: any,
+  axisPointX: number, axisPointY: number, axisPointZ: number,
+  axisDirX: number, axisDirY: number, axisDirZ: number,
+  angleDeg: number
+): any {
+  const pnt = new oc.gp_Pnt_3(axisPointX, axisPointY, axisPointZ);
+  const dir = new oc.gp_Dir_4(axisDirX, axisDirY, axisDirZ);
+  const axis = new oc.gp_Ax1_2(pnt, dir);
+
+  const angleRad = (angleDeg * Math.PI) / 180;
+  const revol = new oc.BRepPrimAPI_MakeRevol_1(shape, axis, angleRad, true);
+  const result = revol.Shape();
+
+  revol.delete();
+  axis.delete();
+  dir.delete();
+  pnt.delete();
+
+  return result;
+}

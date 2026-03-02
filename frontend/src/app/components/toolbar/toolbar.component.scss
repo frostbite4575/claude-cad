@@ -55,4 +55,12 @@
     opacity: 0.3;
     cursor: not-allowed;
   }
+
+  &.plane-btn {
+    font-family: 'Consolas', monospace;
+    font-size: 10px;
+    font-weight: bold;
+    color: #88bbee;
+    border-color: #2a2a4a;
+  }
 }

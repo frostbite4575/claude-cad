@@ -1,18 +1,102 @@
 <canvas #canvas></canvas>
 <div class="property-panel" [class.visible]="selectedEntityId">
   <div class="prop-header">
-    <span class="prop-name">{{ propPanelName }}</span>
+    @if (!editingName) {
+      <span class="prop-name" (dblclick)="startRename()" title="Double-click to rename">{{ propPanelName }}</span>
+    } @else {
+      <input class="prop-name-input" [(ngModel)]="editNameValue"
+        (keydown.enter)="confirmRename()"
+        (keydown.escape)="cancelRename()"
+        (blur)="confirmRename()" />
+    }
     <button class="prop-close" (click)="deselectEntity()">&times;</button>
   </div>
   <div class="prop-row"><span class="prop-label">Type</span><span class="prop-value">{{ propPanelType }}</span></div>
   <div class="prop-row"><span class="prop-label">Kind</span><span class="prop-value">{{ propPanelKind }}</span></div>
   <div class="prop-row"><span class="prop-label">Size</span><span class="prop-value">{{ propPanelDims }}</span></div>
   <div class="prop-actions">
-    <button class="prop-btn" (click)="extrudeSelected()">Extrude</button>
+    @if (!showExtrudeInput) {
+      <button class="prop-btn" (click)="extrudeSelected()">Extrude</button>
+    } @else {
+      <div class="extrude-input">
+        <input type="number" step="0.25" [(ngModel)]="extrudeHeight"
+          placeholder="Height"
+          (keydown.enter)="confirmExtrude()"
+          (keydown.escape)="cancelExtrude()" />
+        <button class="prop-btn small" (click)="confirmExtrude()">OK</button>
+      </div>
+    }
     <button class="prop-btn danger" (click)="deleteSelected()">Delete</button>
   </div>
 </div>
+<div class="dimension-label" [class.visible]="dimensionText" [style.left.px]="dimensionX" [style.top.px]="dimensionY">{{ dimensionText }}</div>
 <div class="coord-display" [class.visible]="drawingToolActive">
   X: {{ coordX }} &nbsp; Y: {{ coordY }}
   <span class="snap-indicator" [class.on]="snapEnabled" (click)="toggleSnap()">SNAP {{ snapEnabled ? 'ON' : 'OFF' }}</span>
+  <span class="grid-size" (click)="cycleGridSize()">{{ snapSize }}"</span>
+</div>
+<div class="measure-display" [class.visible]="measureResult">{{ measureResult }}</div>
+<button class="entity-list-toggle" (click)="toggleEntityList()" title="Entity list (Tab)">
+  <svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M2 3h12M2 6.5h12M2 10h12M2 13h8" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/></svg>
+</button>
+<div class="entity-list" [class.visible]="showEntityList">
+  <div class="entity-list-title">Entities</div>
+  @for (item of entityList; track item.id) {
+    <div class="entity-item" [class.selected]="item.selected" [class.hidden-entity]="!item.visible" (click)="selectFromList(item.id, $event)">
+      <span class="entity-kind-badge" [class.sketch]="item.kind === 'sketch'">{{ item.kind === 'sketch' ? 'S' : '3D' }}</span>
+      <span class="entity-item-name">{{ item.name }}</span>
+      <span class="entity-eye" [class.off]="!item.visible" (click)="toggleEntityVisibility(item.id, $event)" title="Toggle visibility">
+        @if (item.visible) {
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M1 6s2-3.5 5-3.5S11 6 11 6s-2 3.5-5 3.5S1 6 1 6z" stroke="currentColor" stroke-width="1"/><circle cx="6" cy="6" r="1.5" stroke="currentColor" stroke-width="1"/></svg>
+        } @else {
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none"><path d="M2 2l8 8M1 6s2-3.5 5-3.5c1 0 1.8.3 2.5.8M11 6s-1 1.8-2.5 2.7" stroke="currentColor" stroke-width="1" stroke-linecap="round"/></svg>
+        }
+      </span>
+    </div>
+  }
+  @if (entityList.length === 0) {
+    <div class="entity-list-empty">No entities</div>
+  }
+</div>
+<div class="help-overlay" [class.visible]="showHelp" (click)="showHelp = false">
+  <div class="help-panel" (click)="$event.stopPropagation()">
+    <div class="help-title">Keyboard Shortcuts</div>
+    <div class="help-section">Drawing Tools</div>
+    <div class="help-row"><kbd>L</kbd> Line</div>
+    <div class="help-row"><kbd>R</kbd> Rectangle</div>
+    <div class="help-row"><kbd>C</kbd> Circle</div>
+    <div class="help-row"><kbd>A</kbd> Arc</div>
+    <div class="help-row"><kbd>M</kbd> Measure</div>
+    <div class="help-row"><kbd>Esc</kbd> Cancel tool</div>
+    <div class="help-section">Editing</div>
+    <div class="help-row"><kbd>Del</kbd> Delete selected</div>
+    <div class="help-row"><kbd>Ctrl+D</kbd> Duplicate selected</div>
+    <div class="help-row"><kbd>Ctrl+Z</kbd> Undo</div>
+    <div class="help-row"><kbd>Ctrl+Y</kbd> Redo</div>
+    <div class="help-row"><kbd>Shift+Click</kbd> Multi-select</div>
+    <div class="help-section">Views</div>
+    <div class="help-row"><kbd>1</kbd> Front view</div>
+    <div class="help-row"><kbd>3</kbd> Right view</div>
+    <div class="help-row"><kbd>7</kbd> Top view</div>
+    <div class="help-row"><kbd>0</kbd> Isometric view</div>
+    <div class="help-row"><kbd>Home</kbd> Zoom to fit</div>
+    <div class="help-section">File</div>
+    <div class="help-row"><kbd>Ctrl+S</kbd> Save project</div>
+    <div class="help-row"><kbd>Ctrl+O</kbd> Open project</div>
+    <div class="help-row"><kbd>?</kbd> Toggle this help</div>
+  </div>
+</div>
+<div class="view-controls">
+  <button class="view-btn" title="View mode (V)" (click)="cycleViewMode()">
+    @if (viewMode === 'both') { S+W }
+    @else if (viewMode === 'shaded') { S }
+    @else { W }
+  </button>
+  <button class="view-btn" title="Front view (1)" (click)="setView('front')">F</button>
+  <button class="view-btn" title="Top view (7)" (click)="setView('top')">T</button>
+  <button class="view-btn" title="Right view (3)" (click)="setView('right')">R</button>
+  <button class="view-btn" title="Isometric view (0)" (click)="setView('iso')">3D</button>
+  <button class="view-btn fit" title="Zoom to fit (Home)" (click)="zoomToFit()">
+    <svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="1" y="1" width="12" height="12" rx="1" stroke="currentColor" stroke-width="1.5"/><path d="M1 5h3V1M13 5h-3V1M1 9h3v4M13 9h-3v4" stroke="currentColor" stroke-width="1.2"/></svg>
+  </button>
 </div>

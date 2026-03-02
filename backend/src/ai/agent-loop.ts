@@ -14,7 +14,7 @@ const HISTORY_PATH = join(__dirname, '..', '..', 'conversation-history.json');
 const SYSTEM_PROMPT = `You are Claude CAD, an AI assistant for a browser-based CAD tool designed for metal fabrication and plasma cutting.
 
 Key rules:
-- All dimensions are in inches.
+- All dimensions use the document's unit system (check the scene context for current units — default is inches). Use set_units to switch between inches and mm.
 - Use the provided tools to create and manipulate 3D geometry.
 - After creating or modifying geometry, briefly confirm what you did.
 - When the user asks about the scene, use get_scene_info to check.
@@ -26,7 +26,11 @@ Key rules:
 - Closed sketches (rectangle, circle) can be extruded into 3D solids with the extrude tool.
 - Open sketches (line, arc) cannot be extruded.
 - For flat plasma-cut parts: draw a sketch and export DXF directly — no need to extrude.
-- For 3D parts: draw a sketch, then extrude it.
+- For 3D parts: draw a sketch, then extrude it (linear) or revolve it (rotational).
+- Use revolve for turned parts, vases, pulleys, bushings, rings — any shape with rotational symmetry. Draw a 2D profile sketch, then revolve it around an axis (default: Y axis).
+- Use shell to hollow out a solid (e.g. turn a box into an open-top container).
+- Use loft to blend between 2+ sketch profiles at different positions — great for funnels, transitions, organic shapes.
+- Use sweep to extrude a profile along a curved path — great for pipes, rails, channels.
 - Boolean, fillet, and chamfer operations only work on 3D solids, not sketches.
 - When the user says "draw" or asks for a 2D shape, prefer sketch tools. When they say "create" a 3D shape or specify depth/thickness, use create_box/create_cylinder or sketch + extrude.
 
@@ -115,7 +119,7 @@ function pruneHistory(): void {
 
 // Tools that don't mutate state — no snapshot needed
 const READ_ONLY_TOOLS = new Set([
-  'get_scene_info', 'export_dxf', 'export_step', 'undo', 'redo',
+  'get_scene_info', 'export_dxf', 'export_step', 'export_stl', 'undo', 'redo',
   'get_flat_pattern', 'list_materials', 'measure_distance', 'measure_entity',
   'list_templates', 'nest_preview', 'get_bend_table',
   'estimate_weight', 'estimate_cost',
@@ -165,9 +169,10 @@ async function _runAgentLoop(
   const selectionNote = selectedEntity
     ? `\n[Selected: ${selectedEntity.id} "${selectedEntity.name}" (${selectedEntity.type}, ${selectedEntity.entityKind})]`
     : '';
+  const units = state.getUnits();
   const sceneContext = sceneInfo.length === 0
-    ? '\n\n[Scene is currently empty]'
-    : `\n\n[Current scene: ${sceneInfo.map((e) => `${e.id} "${e.name}" (${e.type}, ${e.entityKind})`).join(', ')}]${selectionNote}`;
+    ? `\n\n[Scene is currently empty | Units: ${units}]`
+    : `\n\n[Current scene (units: ${units}): ${sceneInfo.map((e) => `${e.id} "${e.name}" (${e.type}, ${e.entityKind})`).join(', ')}]${selectionNote}`;
 
   conversationHistory.push({
     role: 'user',

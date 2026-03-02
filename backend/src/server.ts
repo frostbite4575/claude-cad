@@ -9,7 +9,10 @@ import { UndoRedoManager } from './state/undo-redo.js';
 import { handleChatMessage, clearConversationHistory } from './ai/agent-loop.js';
 import { exportDxf } from './geometry/dxf-export.js';
 import { exportStep } from './geometry/step-export.js';
+import { exportStl } from './geometry/stl-export.js';
 import { parseDxf, dxfToShapes } from './geometry/dxf-import.js';
+import { importStep } from './geometry/step-import.js';
+import { saveProject, loadProject } from './state/project-io.js';
 import { executeTool } from './ai/tools.js';
 import type { WSMessage, MeshUpdatePayload, ChatMessagePayload, EntitySelectedPayload, ToolExecutePayload } from '../../shared/index.js';
 
@@ -116,6 +119,44 @@ app.get('/api/export/step', (req, res) => {
   }
 });
 
+// STL export endpoint
+app.get('/api/export/stl', (req, res) => {
+  if (!docState) {
+    res.status(500).json({ error: 'Document state not initialized' });
+    return;
+  }
+
+  const entityId = req.query.entity_id as string | undefined;
+  const oc = getOC();
+  let shapes: any[];
+
+  if (entityId) {
+    const entity = docState.getEntity(entityId);
+    if (!entity) {
+      res.status(404).json({ error: `Entity ${entityId} not found` });
+      return;
+    }
+    shapes = [entity.shape];
+  } else {
+    const allEntities = docState.getAllEntities();
+    if (allEntities.length === 0) {
+      res.status(400).json({ error: 'Scene is empty — nothing to export' });
+      return;
+    }
+    shapes = allEntities.map((e) => e.shape);
+  }
+
+  try {
+    const result = exportStl(oc, shapes);
+    res.setHeader('Content-Type', 'application/sla');
+    res.setHeader('Content-Disposition', 'attachment; filename="export.stl"');
+    res.send(result.stlContent);
+  } catch (err: any) {
+    console.error('STL export error:', err);
+    res.status(500).json({ error: err.message || 'STL export failed' });
+  }
+});
+
 // DXF import
 app.post('/api/import/dxf', (req, res) => {
   if (!docState) {
@@ -169,6 +210,112 @@ app.post('/api/import/dxf', (req, res) => {
   } catch (err: any) {
     console.error('DXF import error:', err);
     res.status(500).json({ error: err.message || 'DXF import failed' });
+  }
+});
+
+// Project save
+app.get('/api/project/save', (req, res) => {
+  if (!docState) {
+    res.status(500).json({ error: 'Document state not initialized' });
+    return;
+  }
+
+  try {
+    const oc = getOC();
+    const project = saveProject(oc, docState);
+    const json = JSON.stringify(project);
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', 'attachment; filename="project.ccad"');
+    res.send(json);
+  } catch (err: any) {
+    console.error('Project save error:', err);
+    res.status(500).json({ error: err.message || 'Project save failed' });
+  }
+});
+
+// Project load
+app.post('/api/project/load', express.json({ limit: '100mb' }), (req, res) => {
+  if (!docState) {
+    res.status(500).json({ error: 'Document state not initialized' });
+    return;
+  }
+
+  try {
+    const project = req.body;
+    if (!project || !project.version) {
+      res.status(400).json({ error: 'Invalid project file format' });
+      return;
+    }
+
+    const oc = getOC();
+
+    if (undoManager) {
+      undoManager.captureSnapshot(docState, 'load_project');
+    }
+
+    const result = loadProject(oc, docState, project);
+
+    // Broadcast mesh update to all connected clients
+    const meshes = docState.tessellateAll();
+    wss.clients.forEach((client) => {
+      if (client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ type: 'mesh_update', payload: { meshes } }));
+      }
+    });
+
+    res.json({
+      success: true,
+      entity_count: docState.getAllEntities().length,
+      warnings: result.warnings,
+    });
+  } catch (err: any) {
+    console.error('Project load error:', err);
+    res.status(500).json({ error: err.message || 'Project load failed' });
+  }
+});
+
+// STEP import
+app.post('/api/import/step', express.text({ type: '*/*', limit: '50mb' }), (req, res) => {
+  if (!docState) {
+    res.status(500).json({ error: 'Document state not initialized' });
+    return;
+  }
+
+  try {
+    const stepContent = typeof req.body === 'string' ? req.body : req.body?.content;
+    if (!stepContent || typeof stepContent !== 'string') {
+      res.status(400).json({ error: 'Request body must contain STEP file content as text' });
+      return;
+    }
+
+    const oc = getOC();
+    const result = importStep(oc, stepContent);
+
+    if (result.shapes.length === 0) {
+      res.status(400).json({ error: 'No shapes found in STEP file', warnings: result.warnings });
+      return;
+    }
+
+    const importedIds: string[] = [];
+    for (let i = 0; i < result.shapes.length; i++) {
+      const entity = docState.addEntity(
+        `STEP Import ${i + 1}`,
+        'step_import',
+        result.shapes[i],
+        { entityKind: 'solid' as const }
+      );
+      importedIds.push(entity.id);
+    }
+
+    res.json({
+      success: true,
+      entity_ids: importedIds,
+      shape_count: result.shapes.length,
+      warnings: result.warnings,
+    });
+  } catch (err: any) {
+    console.error('STEP import error:', err);
+    res.status(500).json({ error: err.message || 'STEP import failed' });
   }
 });
 

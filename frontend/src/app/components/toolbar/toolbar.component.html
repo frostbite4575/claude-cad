@@ -2,6 +2,24 @@
 
 <div class="separator"></div>
 
+<!-- File operations -->
+<button class="toolbar-btn" title="Save Project (Ctrl+S)" (click)="saveProject()">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M5 3h8l3 3v9a2 2 0 01-2 2H5a2 2 0 01-2-2V5a2 2 0 012-2z" stroke="currentColor" stroke-width="1.5"/>
+    <path d="M7 3v4h6V3" stroke="currentColor" stroke-width="1.5"/>
+    <path d="M7 13h6M7 15h4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+  </svg>
+</button>
+
+<button class="toolbar-btn" title="Open Project (Ctrl+O)" (click)="loadProject()">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M3 7V5a2 2 0 012-2h3l2 2h5a2 2 0 012 2v1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M2 10a1 1 0 011-1h14a1 1 0 011 1l-1 6a1 1 0 01-1 1H4a1 1 0 01-1-1L2 10z" stroke="currentColor" stroke-width="1.5"/>
+  </svg>
+</button>
+
+<div class="separator"></div>
+
 <!-- Undo / Redo -->
 <button class="toolbar-btn" title="Undo (Ctrl+Z)" (click)="undo()">
   <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -18,6 +36,11 @@
 </button>
 
 <div class="separator"></div>
+
+<!-- Sketch plane selector -->
+<button class="toolbar-btn plane-btn" title="Sketch plane (click to cycle)" (click)="cycleSketchPlane()">
+  {{ sketchPlane }}
+</button>
 
 <!-- Drawing tools -->
 <button class="toolbar-btn" title="Line (L)" [ngClass]="{ active: activeTool === 'line' }" (click)="setTool('line')">
@@ -41,6 +64,13 @@
 <button class="toolbar-btn" title="Arc (A)" [ngClass]="{ active: activeTool === 'arc' }" (click)="setTool('arc')">
   <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
     <path d="M4 14 A8 8 0 0 1 16 14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+  </svg>
+</button>
+
+<button class="toolbar-btn" title="Measure (M)" [ngClass]="{ active: activeTool === 'measure' }" (click)="setTool('measure')">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M3 17L17 3" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M3 17v-4M3 17h4M17 3v4M17 3h-4" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/>
   </svg>
 </button>
 
@@ -78,5 +108,24 @@
     <path d="M3 15v1a1 1 0 001 1h12a1 1 0 001-1v-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
     <rect x="13" y="2" width="5" height="4" rx="1" fill="#16162a" stroke="currentColor" stroke-width="1"/>
     <text x="15.5" y="5" text-anchor="middle" font-size="3" fill="currentColor" font-family="monospace">3D</text>
+  </svg>
+</button>
+
+<button class="toolbar-btn" title="Export STL" (click)="exportStl()">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M10 3v10M10 13l-3.5-3.5M10 13l3.5-3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M3 15v1a1 1 0 001 1h12a1 1 0 001-1v-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <rect x="13" y="2" width="5" height="4" rx="1" fill="#16162a" stroke="currentColor" stroke-width="1"/>
+    <text x="15.5" y="5" text-anchor="middle" font-size="3" fill="currentColor" font-family="monospace">STL</text>
+  </svg>
+</button>
+
+<div class="separator"></div>
+
+<!-- Import -->
+<button class="toolbar-btn" title="Import STEP file" (click)="importStep()">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M10 13V3M10 3l-3.5 3.5M10 3l3.5 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M3 15v1a1 1 0 001 1h12a1 1 0 001-1v-1" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
   </svg>
 </button>
