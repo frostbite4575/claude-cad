@@ -12,6 +12,20 @@ canvas {
   height: 100%;
 }
 
+.connection-banner {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(180, 40, 40, 0.9);
+  color: #fff;
+  padding: 4px 16px;
+  border-radius: 4px;
+  font-size: 12px;
+  z-index: 100;
+  pointer-events: none;
+}
+
 .property-panel {
   position: absolute;
   top: 12px;

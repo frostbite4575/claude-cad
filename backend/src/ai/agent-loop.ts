@@ -1,6 +1,6 @@
 import type { MessageParam, ContentBlockParam } from '@anthropic-ai/sdk/resources/messages.js';
 import { getAnthropicClient } from './anthropic-client.js';
-import { cadTools, executeTool } from './tools.js';
+import { cadTools, executeTool } from './tools/index.js';
 import type { DocumentState } from '../state/document-state.js';
 import type { UndoRedoManager } from '../state/undo-redo.js';
 import type { WSMessage, ChatResponsePayload, ChatToolUsePayload, MeshUpdatePayload } from '../../../shared/index.js';
@@ -11,21 +11,21 @@ import { fileURLToPath } from 'url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const HISTORY_PATH = join(__dirname, '..', '..', 'conversation-history.json');
 
-const SYSTEM_PROMPT = `You are Claude CAD, an AI assistant for a browser-based CAD tool designed for metal fabrication and plasma cutting.
+const SYSTEM_PROMPT = `You are Claude CAD, an AI assistant for a general-purpose browser-based 3D CAD tool. You help users design parts, assemblies, and models using 2D sketches, 3D solids, booleans, transforms, and more.
 
 Key rules:
 - All dimensions use the document's unit system (check the scene context for current units — default is inches). Use set_units to switch between inches and mm.
 - Use the provided tools to create and manipulate 3D geometry.
 - After creating or modifying geometry, briefly confirm what you did.
 - When the user asks about the scene, use get_scene_info to check.
-- Be concise and practical — this is a shop-floor tool.
+- Be concise and practical.
 
 2D Sketch workflow:
 - Use sketch_rectangle, sketch_circle, sketch_line, sketch_arc to draw 2D profiles on the XY plane.
 - Sketches appear as cyan outlines in the viewport.
 - Closed sketches (rectangle, circle) can be extruded into 3D solids with the extrude tool.
 - Open sketches (line, arc) cannot be extruded.
-- For flat plasma-cut parts: draw a sketch and export DXF directly — no need to extrude.
+- For flat 2D parts: draw a sketch and export DXF directly — no need to extrude.
 - For 3D parts: draw a sketch, then extrude it (linear) or revolve it (rotational).
 - Use revolve for turned parts, vases, pulleys, bushings, rings — any shape with rotational symmetry. Draw a 2D profile sketch, then revolve it around an axis (default: Y axis).
 - Use shell to hollow out a solid (e.g. turn a box into an open-top container).
@@ -39,13 +39,13 @@ Mirror & Pattern tools:
 - Use linear_pattern for rows of repeated features (e.g. evenly spaced holes, mounting slots).
 - Use circular_pattern for bolt hole circles and radial patterns. Default: copies around Z axis at origin over 360°.
 
-Sheet metal workflow (flat-first):
+Sheet metal module:
 - Use create_sheet_metal_plate to start (specify material like "1/4 mild steel").
 - Use list_materials to see available materials.
 - Use add_bend_line to define fold locations. Position = distance from left (Y-axis) or bottom (X-axis) edge.
 - Use get_flat_pattern to verify bend calculations before export.
 - Use fold_sheet_metal to create a 3D preview (original flat plate is kept).
-- Export the flat plate entity with export_dxf for plasma cutting. Bend lines appear on a BEND layer.
+- Export the flat plate entity with export_dxf for CNC cutting. Bend lines appear on a BEND layer.
 - For flat parts without bends, just create the plate and export directly.
 
 Cutout & hole tools:
@@ -56,6 +56,11 @@ Cutout & hole tools:
 - All cutout tools auto-detect depth from the entity geometry. Works on any solid including sheet metal plates.
 - Cutting a sheet metal plate preserves its material and bend line metadata.
 - Prefer cutout tools over manual cylinder + translate + boolean_subtract for holes.
+
+Export formats:
+- DXF: 2D flat patterns with lines, arcs, circles (no splines). Use classify_layers for OUTSIDE/INSIDE layer separation.
+- STEP: Full 3D geometry for interchange with SolidWorks, Fusion 360, FreeCAD, etc.
+- STL: Triangulated mesh for 3D printing.
 
 Entity selection:
 - The user can click entities in the viewport to select them. The currently selected entity is shown in the scene context.
@@ -243,8 +248,11 @@ async function _runAgentLoop(
         }
 
         // Execute the tool
+        const toolStart = performance.now();
         const result = executeTool(state, block.name, block.input as Record<string, any>, undoManager);
-        console.log(`Tool ${block.name}:`, result);
+        const toolDuration = (performance.now() - toolStart).toFixed(1);
+        const toolSuccess = !result.startsWith('Error') && !result.startsWith('❌');
+        console.log(`[tool] ${block.name} | ${toolSuccess ? 'OK' : 'FAIL'} | ${toolDuration}ms | ${result.slice(0, 120)}`);
 
         toolResults.push({
           type: 'tool_result',

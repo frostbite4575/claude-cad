@@ -1,5 +1,5 @@
 import { Injectable, OnDestroy } from '@angular/core';
-import { Subject, Observable } from 'rxjs';
+import { Subject, Observable, BehaviorSubject } from 'rxjs';
 
 export interface WSMessage {
   type: string;
@@ -13,8 +13,17 @@ export class WebsocketService implements OnDestroy {
   private socket: WebSocket | null = null;
   private messagesSubject = new Subject<WSMessage>();
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectDelay = 2000;
+  private readonly maxReconnectDelay = 30000;
+
+  private connectedSubject = new BehaviorSubject<boolean>(false);
 
   messages$: Observable<WSMessage> = this.messagesSubject.asObservable();
+  connected$: Observable<boolean> = this.connectedSubject.asObservable();
+
+  get isConnected(): boolean {
+    return this.connectedSubject.value;
+  }
 
   constructor() {
     this.connect();
@@ -28,6 +37,8 @@ export class WebsocketService implements OnDestroy {
 
     this.socket.onopen = () => {
       console.log('WebSocket connected');
+      this.reconnectDelay = 2000; // reset on successful connect
+      this.connectedSubject.next(true);
     };
 
     this.socket.onmessage = (event) => {
@@ -40,8 +51,10 @@ export class WebsocketService implements OnDestroy {
     };
 
     this.socket.onclose = () => {
-      console.log('WebSocket disconnected, reconnecting in 2s...');
-      this.reconnectTimer = setTimeout(() => this.connect(), 2000);
+      this.connectedSubject.next(false);
+      console.log(`WebSocket disconnected, reconnecting in ${(this.reconnectDelay / 1000).toFixed(0)}s...`);
+      this.reconnectTimer = setTimeout(() => this.connect(), this.reconnectDelay);
+      this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay);
     };
 
     this.socket.onerror = (err) => {

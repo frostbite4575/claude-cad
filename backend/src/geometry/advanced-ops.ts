@@ -16,30 +16,29 @@ export function shellShape(
     facesToRemove = [findTopFace(oc, shape)];
   }
 
-  // Build TopTools_ListOfShape of faces to remove
   const faceList = new oc.TopTools_ListOfShape_1();
   for (const face of facesToRemove) {
     faceList.Append_1(face);
   }
 
   const maker = new oc.BRepOffsetAPI_MakeThickSolid();
-  // MakeThickSolidByJoin(shape, facesToRemove, offset, tolerance, mode, intersection, selfInter, join, removeIntEdges)
-  maker.MakeThickSolidByJoin(
-    shape,
-    faceList,
-    wallThickness,
-    1e-3,              // tolerance
-    oc.BRepOffset_Mode.BRepOffset_Skin,
-    false,             // intersection
-    false,             // selfInter
-    oc.GeomAbs_JoinType.GeomAbs_Arc,
-    false              // removeIntEdges
-  );
-
-  const result = maker.Shape();
-  maker.delete();
-  faceList.delete();
-  return result;
+  try {
+    maker.MakeThickSolidByJoin(
+      shape,
+      faceList,
+      wallThickness,
+      1e-3,
+      oc.BRepOffset_Mode.BRepOffset_Skin,
+      false,
+      false,
+      oc.GeomAbs_JoinType.GeomAbs_Arc,
+      false
+    );
+    return maker.Shape();
+  } finally {
+    try { maker.delete(); } catch {}
+    try { faceList.delete(); } catch {}
+  }
 }
 
 /**
@@ -50,26 +49,31 @@ function findTopFace(oc: any, shape: any): any {
   let bestFace: any = null;
   let bestZ = -Infinity;
 
-  while (explorer.More()) {
-    const face = oc.TopoDS.Face_1(explorer.Current());
-    // Get face centroid via surface properties
-    const props = new oc.GProp_GProps_1();
-    oc.BRepGProp.SurfaceProperties(face, props, false);
-    const centroid = props.CentreOfMass();
-    const z = centroid.Z();
-    centroid.delete();
-    props.delete();
+  try {
+    while (explorer.More()) {
+      const face = oc.TopoDS.Face_1(explorer.Current());
+      const props = new oc.GProp_GProps_1();
+      try {
+        oc.BRepGProp.SurfaceProperties(face, props, false);
+        const centroid = props.CentreOfMass();
+        const z = centroid.Z();
+        try { centroid.delete(); } catch {}
 
-    if (z > bestZ) {
-      bestZ = z;
-      if (bestFace) bestFace.delete();
-      bestFace = face;
-    } else {
-      face.delete();
+        if (z > bestZ) {
+          bestZ = z;
+          if (bestFace) try { bestFace.delete(); } catch {}
+          bestFace = face;
+        } else {
+          try { face.delete(); } catch {}
+        }
+      } finally {
+        try { props.delete(); } catch {}
+      }
+      explorer.Next();
     }
-    explorer.Next();
+  } finally {
+    try { explorer.delete(); } catch {}
   }
-  explorer.delete();
   return bestFace;
 }
 
@@ -86,23 +90,26 @@ export function loftShapes(
   if (wires.length < 2) throw new Error('Loft requires at least 2 profiles');
 
   const loft = new oc.BRepOffsetAPI_ThruSections(isSolid, false, 1e-6);
-  for (const wire of wires) {
-    // If it's a face, extract the outer wire
-    const shapeType = wire.ShapeType();
-    if (shapeType === oc.TopAbs_ShapeEnum.TopAbs_WIRE) {
-      loft.AddWire(oc.TopoDS.Wire_1(wire));
-    } else if (shapeType === oc.TopAbs_ShapeEnum.TopAbs_FACE) {
-      const outerWire = oc.BRepTools.OuterWire(oc.TopoDS.Face_1(wire));
-      loft.AddWire(outerWire);
-    } else {
-      throw new Error(`Loft profile must be a wire or face, got shape type ${shapeType}`);
+  const progress = new oc.Message_ProgressRange_1();
+  try {
+    for (const wire of wires) {
+      const shapeType = wire.ShapeType();
+      if (shapeType === oc.TopAbs_ShapeEnum.TopAbs_WIRE) {
+        loft.AddWire(oc.TopoDS.Wire_1(wire));
+      } else if (shapeType === oc.TopAbs_ShapeEnum.TopAbs_FACE) {
+        const outerWire = oc.BRepTools.OuterWire(oc.TopoDS.Face_1(wire));
+        loft.AddWire(outerWire);
+      } else {
+        throw new Error(`Loft profile must be a wire or face, got shape type ${shapeType}`);
+      }
     }
-  }
 
-  loft.Build(new oc.Message_ProgressRange_1());
-  const result = loft.Shape();
-  loft.delete();
-  return result;
+    loft.Build(progress);
+    return loft.Shape();
+  } finally {
+    try { loft.delete(); } catch {}
+    try { progress.delete(); } catch {}
+  }
 }
 
 /**
@@ -115,7 +122,6 @@ export function sweepShape(
   profile: any,
   spine: any
 ): any {
-  // Ensure profile is a wire
   let wire: any;
   const shapeType = profile.ShapeType();
   if (shapeType === oc.TopAbs_ShapeEnum.TopAbs_WIRE) {
@@ -128,7 +134,9 @@ export function sweepShape(
 
   const spineWire = oc.TopoDS.Wire_1(spine);
   const pipe = new oc.BRepOffsetAPI_MakePipe_1(spineWire, wire);
-  const result = pipe.Shape();
-  pipe.delete();
-  return result;
+  try {
+    return pipe.Shape();
+  } finally {
+    try { pipe.delete(); } catch {}
+  }
 }

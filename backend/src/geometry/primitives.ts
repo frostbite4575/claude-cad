@@ -1,24 +1,19 @@
 import type { OpenCascadeInstance } from './oc-init.js';
+import { withCleanup, DisposableCollector } from './oc-cleanup.js';
 
 export function createBox(oc: OpenCascadeInstance, width: number, height: number, depth: number): any {
   const maker = new oc.BRepPrimAPI_MakeBox_1(width, height, depth);
-  const shape = maker.Shape();
-  maker.delete();
-  return shape;
+  return withCleanup([maker], () => maker.Shape());
 }
 
 export function createCylinder(oc: OpenCascadeInstance, radius: number, height: number): any {
   const maker = new oc.BRepPrimAPI_MakeCylinder_1(radius, height);
-  const shape = maker.Shape();
-  maker.delete();
-  return shape;
+  return withCleanup([maker], () => maker.Shape());
 }
 
 export function createSphere(oc: OpenCascadeInstance, radius: number): any {
   const maker = new oc.BRepPrimAPI_MakeSphere_1(radius);
-  const shape = maker.Shape();
-  maker.delete();
-  return shape;
+  return withCleanup([maker], () => maker.Shape());
 }
 
 /**
@@ -32,47 +27,39 @@ export function createPolygonExtrusion(
 ): any {
   if (points.length < 3) throw new Error('Polygon needs at least 3 points');
 
-  // Build edges between consecutive points
-  const edges: any[] = [];
-  const ocPoints: any[] = [];
-  for (const [x, y] of points) {
-    ocPoints.push(new oc.gp_Pnt_3(x, y, 0));
+  const gc = new DisposableCollector();
+  try {
+    const ocPoints = points.map(([x, y]) => gc.track(new oc.gp_Pnt_3(x, y, 0)));
+
+    const edges: any[] = [];
+    for (let i = 0; i < ocPoints.length; i++) {
+      const next = (i + 1) % ocPoints.length;
+      const edgeMaker = gc.track(new oc.BRepBuilderAPI_MakeEdge_3(ocPoints[i], ocPoints[next]));
+      edges.push(edgeMaker.Edge());
+    }
+
+    const wireBuilder = gc.track(new oc.BRepBuilderAPI_MakeWire_1());
+    for (const edge of edges) {
+      wireBuilder.Add_1(edge);
+    }
+    const wire = wireBuilder.Wire();
+
+    const faceMaker = gc.track(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
+    const face = faceMaker.Shape();
+
+    const dir = gc.track(new oc.gp_Vec_4(0, 0, height));
+    const prism = gc.track(new oc.BRepPrimAPI_MakePrism_1(face, dir, false, true));
+    const solid = prism.Shape();
+
+    // Clean up intermediate shapes that aren't tracked by gc
+    for (const e of edges) try { e.delete(); } catch {}
+    try { wire.delete(); } catch {}
+    try { face.delete(); } catch {}
+
+    return solid;
+  } finally {
+    gc.cleanup();
   }
-
-  for (let i = 0; i < ocPoints.length; i++) {
-    const next = (i + 1) % ocPoints.length;
-    const edgeMaker = new oc.BRepBuilderAPI_MakeEdge_3(ocPoints[i], ocPoints[next]);
-    edges.push(edgeMaker.Edge());
-    edgeMaker.delete();
-  }
-
-  // Build wire from edges
-  const wireBuilder = new oc.BRepBuilderAPI_MakeWire_1();
-  for (const edge of edges) {
-    wireBuilder.Add_1(edge);
-  }
-  const wire = wireBuilder.Wire();
-
-  // Make face from wire
-  const faceMaker = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
-  const face = faceMaker.Shape();
-
-  // Extrude along Z
-  const dir = new oc.gp_Vec_4(0, 0, height);
-  const prism = new oc.BRepPrimAPI_MakePrism_1(face, dir, false, true);
-  const solid = prism.Shape();
-
-  // Cleanup
-  prism.delete();
-  dir.delete();
-  face.delete();
-  faceMaker.delete();
-  wire.delete();
-  wireBuilder.delete();
-  for (const e of edges) e.delete();
-  for (const p of ocPoints) p.delete();
-
-  return solid;
 }
 
 /**
@@ -90,15 +77,8 @@ export function revolveShape(
   const pnt = new oc.gp_Pnt_3(axisPointX, axisPointY, axisPointZ);
   const dir = new oc.gp_Dir_4(axisDirX, axisDirY, axisDirZ);
   const axis = new oc.gp_Ax1_2(pnt, dir);
-
   const angleRad = (angleDeg * Math.PI) / 180;
   const revol = new oc.BRepPrimAPI_MakeRevol_1(shape, axis, angleRad, true);
-  const result = revol.Shape();
 
-  revol.delete();
-  axis.delete();
-  dir.delete();
-  pnt.delete();
-
-  return result;
+  return withCleanup([revol, axis, dir, pnt], () => revol.Shape());
 }

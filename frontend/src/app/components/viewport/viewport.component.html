@@ -1,4 +1,7 @@
 <canvas #canvas></canvas>
+@if (!wsConnected) {
+  <div class="connection-banner">Disconnected — reconnecting...</div>
+}
 <div class="property-panel" [class.visible]="selectedEntityId">
   <div class="prop-header">
     @if (!editingName) {

@@ -13,7 +13,7 @@ import { exportStl } from './geometry/stl-export.js';
 import { parseDxf, dxfToShapes } from './geometry/dxf-import.js';
 import { importStep } from './geometry/step-import.js';
 import { saveProject, loadProject } from './state/project-io.js';
-import { executeTool } from './ai/tools.js';
+import { executeTool } from './ai/tools/index.js';
 import type { WSMessage, MeshUpdatePayload, ChatMessagePayload, EntitySelectedPayload, ToolExecutePayload } from '../../shared/index.js';
 
 const PORT = 3000;

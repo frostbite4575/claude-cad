@@ -1,4 +1,5 @@
 import type { OpenCascadeInstance } from './oc-init.js';
+import { withCleanup, DisposableCollector } from './oc-cleanup.js';
 
 export type SketchPlane = 'XY' | 'XZ' | 'YZ';
 
@@ -12,23 +13,25 @@ export function transformToPlane(oc: OpenCascadeInstance, shape: any, plane: Ske
   const trsf = new oc.gp_Trsf_1();
 
   if (plane === 'XZ') {
-    // Rotate -90° around X axis: Y→Z, Z→-Y (XY plane maps to XZ plane)
-    const ax = new oc.gp_Ax1_2(new oc.gp_Pnt_3(0, 0, 0), new oc.gp_Dir_4(1, 0, 0));
+    const origin = new oc.gp_Pnt_3(0, 0, 0);
+    const dir = new oc.gp_Dir_4(1, 0, 0);
+    const ax = new oc.gp_Ax1_2(origin, dir);
     trsf.SetRotation_1(ax, -Math.PI / 2);
-    ax.delete();
+    try { ax.delete(); } catch {}
+    try { origin.delete(); } catch {}
+    try { dir.delete(); } catch {}
   } else if (plane === 'YZ') {
-    // Rotate 90° around Y axis: X→Z, Z→-X (XY plane maps to YZ plane)
-    const ax = new oc.gp_Ax1_2(new oc.gp_Pnt_3(0, 0, 0), new oc.gp_Dir_4(0, 1, 0));
+    const origin = new oc.gp_Pnt_3(0, 0, 0);
+    const dir = new oc.gp_Dir_4(0, 1, 0);
+    const ax = new oc.gp_Ax1_2(origin, dir);
     trsf.SetRotation_1(ax, Math.PI / 2);
-    ax.delete();
+    try { ax.delete(); } catch {}
+    try { origin.delete(); } catch {}
+    try { dir.delete(); } catch {}
   }
 
   const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
-  const result = transformer.Shape();
-  transformer.delete();
-  trsf.delete();
-
-  return result;
+  return withCleanup([transformer, trsf], () => transformer.Shape());
 }
 
 /**
@@ -43,11 +46,7 @@ export function createSketchLine(
   const p1 = new oc.gp_Pnt_3(x1, y1, z);
   const p2 = new oc.gp_Pnt_3(x2, y2, z);
   const edgeMaker = new oc.BRepBuilderAPI_MakeEdge_3(p1, p2);
-  const edge = edgeMaker.Edge();
-  edgeMaker.delete();
-  p1.delete();
-  p2.delete();
-  return edge;
+  return withCleanup([edgeMaker, p1, p2], () => edgeMaker.Edge());
 }
 
 /**
@@ -60,38 +59,39 @@ export function createSketchRectangle(
   width: number, height: number,
   z: number = 0
 ): any {
-  const corners = [
-    new oc.gp_Pnt_3(x, y, z),
-    new oc.gp_Pnt_3(x + width, y, z),
-    new oc.gp_Pnt_3(x + width, y + height, z),
-    new oc.gp_Pnt_3(x, y + height, z),
-  ];
+  const gc = new DisposableCollector();
+  try {
+    const corners = [
+      gc.track(new oc.gp_Pnt_3(x, y, z)),
+      gc.track(new oc.gp_Pnt_3(x + width, y, z)),
+      gc.track(new oc.gp_Pnt_3(x + width, y + height, z)),
+      gc.track(new oc.gp_Pnt_3(x, y + height, z)),
+    ];
 
-  const edges: any[] = [];
-  for (let i = 0; i < 4; i++) {
-    const next = (i + 1) % 4;
-    const edgeMaker = new oc.BRepBuilderAPI_MakeEdge_3(corners[i], corners[next]);
-    edges.push(edgeMaker.Edge());
-    edgeMaker.delete();
+    const edges: any[] = [];
+    for (let i = 0; i < 4; i++) {
+      const next = (i + 1) % 4;
+      const edgeMaker = gc.track(new oc.BRepBuilderAPI_MakeEdge_3(corners[i], corners[next]));
+      edges.push(edgeMaker.Edge());
+    }
+
+    const wireBuilder = gc.track(new oc.BRepBuilderAPI_MakeWire_1());
+    for (const edge of edges) {
+      wireBuilder.Add_1(edge);
+    }
+    const wire = wireBuilder.Wire();
+
+    const faceMaker = gc.track(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
+    const face = faceMaker.Shape();
+
+    // Clean up intermediate shapes not tracked by gc
+    for (const e of edges) try { e.delete(); } catch {}
+    try { wire.delete(); } catch {}
+
+    return face;
+  } finally {
+    gc.cleanup();
   }
-
-  const wireBuilder = new oc.BRepBuilderAPI_MakeWire_1();
-  for (const edge of edges) {
-    wireBuilder.Add_1(edge);
-  }
-  const wire = wireBuilder.Wire();
-
-  const faceMaker = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
-  const face = faceMaker.Shape();
-
-  // Cleanup
-  faceMaker.delete();
-  wire.delete();
-  wireBuilder.delete();
-  for (const e of edges) e.delete();
-  for (const c of corners) c.delete();
-
-  return face;
 }
 
 /**
@@ -107,28 +107,25 @@ export function createSketchCircle(
   const dir = new oc.gp_Dir_4(0, 0, 1);
   const ax2 = new oc.gp_Ax2_3(center, dir);
   const circ = new oc.gp_Circ_2(ax2, radius);
-
   const edgeMaker = new oc.BRepBuilderAPI_MakeEdge_8(circ);
   const edge = edgeMaker.Edge();
-
   const wireBuilder = new oc.BRepBuilderAPI_MakeWire_2(edge);
   const wire = wireBuilder.Wire();
-
   const faceMaker = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
-  const face = faceMaker.Shape();
 
-  // Cleanup
-  faceMaker.delete();
-  wire.delete();
-  wireBuilder.delete();
-  edge.delete();
-  edgeMaker.delete();
-  circ.delete();
-  ax2.delete();
-  dir.delete();
-  center.delete();
-
-  return face;
+  try {
+    return faceMaker.Shape();
+  } finally {
+    try { faceMaker.delete(); } catch {}
+    try { wire.delete(); } catch {}
+    try { wireBuilder.delete(); } catch {}
+    try { edge.delete(); } catch {}
+    try { edgeMaker.delete(); } catch {}
+    try { circ.delete(); } catch {}
+    try { ax2.delete(); } catch {}
+    try { dir.delete(); } catch {}
+    try { center.delete(); } catch {}
+  }
 }
 
 /**
@@ -151,15 +148,7 @@ export function createSketchArc(
   const endRad = (endAngleDeg * Math.PI) / 180;
 
   const edgeMaker = new oc.BRepBuilderAPI_MakeEdge_9(circ, startRad, endRad);
-  const edge = edgeMaker.Edge();
-
-  edgeMaker.delete();
-  circ.delete();
-  ax2.delete();
-  dir.delete();
-  center.delete();
-
-  return edge;
+  return withCleanup([edgeMaker, circ, ax2, dir, center], () => edgeMaker.Edge());
 }
 
 /**
@@ -176,33 +165,34 @@ export function createFlatProfile(
     throw new Error('Flat profile requires at least 3 points');
   }
 
-  const ocPoints = points.map(p => new oc.gp_Pnt_3(p.x, p.y, z));
+  const gc = new DisposableCollector();
+  try {
+    const ocPoints = points.map(p => gc.track(new oc.gp_Pnt_3(p.x, p.y, z)));
 
-  const edges: any[] = [];
-  for (let i = 0; i < ocPoints.length; i++) {
-    const next = (i + 1) % ocPoints.length;
-    const edgeMaker = new oc.BRepBuilderAPI_MakeEdge_3(ocPoints[i], ocPoints[next]);
-    edges.push(edgeMaker.Edge());
-    edgeMaker.delete();
+    const edges: any[] = [];
+    for (let i = 0; i < ocPoints.length; i++) {
+      const next = (i + 1) % ocPoints.length;
+      const edgeMaker = gc.track(new oc.BRepBuilderAPI_MakeEdge_3(ocPoints[i], ocPoints[next]));
+      edges.push(edgeMaker.Edge());
+    }
+
+    const wireBuilder = gc.track(new oc.BRepBuilderAPI_MakeWire_1());
+    for (const edge of edges) {
+      wireBuilder.Add_1(edge);
+    }
+    const wire = wireBuilder.Wire();
+
+    const faceMaker = gc.track(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
+    const face = faceMaker.Shape();
+
+    // Clean up intermediate shapes not tracked by gc
+    for (const e of edges) try { e.delete(); } catch {}
+    try { wire.delete(); } catch {}
+
+    return face;
+  } finally {
+    gc.cleanup();
   }
-
-  const wireBuilder = new oc.BRepBuilderAPI_MakeWire_1();
-  for (const edge of edges) {
-    wireBuilder.Add_1(edge);
-  }
-  const wire = wireBuilder.Wire();
-
-  const faceMaker = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
-  const face = faceMaker.Shape();
-
-  // Cleanup
-  faceMaker.delete();
-  wire.delete();
-  wireBuilder.delete();
-  for (const e of edges) e.delete();
-  for (const c of ocPoints) c.delete();
-
-  return face;
 }
 
 /**
@@ -225,10 +215,5 @@ export function extrudeShape(
   );
 
   const prism = new oc.BRepPrimAPI_MakePrism_1(shape, vec, false, true);
-  const solid = prism.Shape();
-
-  prism.delete();
-  vec.delete();
-
-  return solid;
+  return withCleanup([prism, vec], () => prism.Shape());
 }

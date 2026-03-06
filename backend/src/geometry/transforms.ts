@@ -1,15 +1,12 @@
 import type { OpenCascadeInstance } from './oc-init.js';
+import { withCleanup } from './oc-cleanup.js';
 
 export function translateShape(oc: OpenCascadeInstance, shape: any, x: number, y: number, z: number): any {
   const trsf = new oc.gp_Trsf_1();
   const vec = new oc.gp_Vec_4(x, y, z);
   trsf.SetTranslation_1(vec);
   const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
-  const result = transformer.Shape();
-  transformer.delete();
-  trsf.delete();
-  vec.delete();
-  return result;
+  return withCleanup([transformer, trsf, vec], () => transformer.Shape());
 }
 
 export function rotateShape(
@@ -26,13 +23,7 @@ export function rotateShape(
   const trsf = new oc.gp_Trsf_1();
   trsf.SetRotation_1(axis, (angleDeg * Math.PI) / 180);
   const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
-  const result = transformer.Shape();
-  transformer.delete();
-  trsf.delete();
-  axis.delete();
-  origin.delete();
-  dir.delete();
-  return result;
+  return withCleanup([transformer, trsf, axis, origin, dir], () => transformer.Shape());
 }
 
 export function mirrorShape(
@@ -60,13 +51,7 @@ export function mirrorShape(
   const trsf = new oc.gp_Trsf_1();
   trsf.SetMirror_3(ax2);
   const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
-  const result = transformer.Shape();
-  transformer.delete();
-  trsf.delete();
-  ax2.delete();
-  origin.delete();
-  normal.delete();
-  return result;
+  return withCleanup([transformer, trsf, ax2, origin, normal], () => transformer.Shape());
 }
 
 export function scaleShape(
@@ -81,11 +66,7 @@ export function scaleShape(
   const trsf = new oc.gp_Trsf_1();
   trsf.SetScale(center, factor);
   const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
-  const result = transformer.Shape();
-  transformer.delete();
-  trsf.delete();
-  center.delete();
-  return result;
+  return withCleanup([transformer, trsf, center], () => transformer.Shape());
 }
 
 export function linearPatternCopies(
@@ -102,10 +83,7 @@ export function linearPatternCopies(
     const vec = new oc.gp_Vec_4(i * sx, i * sy, i * sz);
     trsf.SetTranslation_1(vec);
     const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
-    copies.push(transformer.Shape());
-    transformer.delete();
-    trsf.delete();
-    vec.delete();
+    copies.push(withCleanup([transformer, trsf, vec], () => transformer.Shape()));
   }
   return copies;
 }
@@ -129,16 +107,17 @@ export function circularPatternCopies(
   const axisPt = new oc.gp_Pnt_3(cx, cy, cz);
   const axisDir = new oc.gp_Dir_4(ax, ay, az);
   const axis = new oc.gp_Ax1_2(axisPt, axisDir);
-  for (let i = 1; i <= count; i++) {
-    const trsf = new oc.gp_Trsf_1();
-    trsf.SetRotation_1(axis, (i * angleStep * Math.PI) / 180);
-    const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
-    copies.push(transformer.Shape());
-    transformer.delete();
-    trsf.delete();
+  try {
+    for (let i = 1; i <= count; i++) {
+      const trsf = new oc.gp_Trsf_1();
+      trsf.SetRotation_1(axis, (i * angleStep * Math.PI) / 180);
+      const transformer = new oc.BRepBuilderAPI_Transform_2(shape, trsf, true);
+      copies.push(withCleanup([transformer, trsf], () => transformer.Shape()));
+    }
+    return copies;
+  } finally {
+    try { axis.delete(); } catch {}
+    try { axisPt.delete(); } catch {}
+    try { axisDir.delete(); } catch {}
   }
-  axis.delete();
-  axisPt.delete();
-  axisDir.delete();
-  return copies;
 }

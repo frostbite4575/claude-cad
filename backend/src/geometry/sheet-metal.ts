@@ -3,6 +3,7 @@ import type { BendLine } from '../materials/materials.js';
 import { calculateBend } from '../materials/materials.js';
 import { booleanIntersect } from './booleans.js';
 import { translateShape } from './transforms.js';
+import { DisposableCollector } from './oc-cleanup.js';
 
 /**
  * Create a flat plate (thin box) on the XY plane with thickness in Z.
@@ -14,9 +15,11 @@ export function createFlatPlate(
   thickness: number
 ): any {
   const maker = new oc.BRepPrimAPI_MakeBox_1(width, length, thickness);
-  const shape = maker.Shape();
-  maker.delete();
-  return shape;
+  try {
+    return maker.Shape();
+  } finally {
+    try { maker.delete(); } catch {}
+  }
 }
 
 /**
@@ -118,10 +121,8 @@ function buildSingleAxisFold(
     let seg: any;
 
     if (sourceShape) {
-      // Extract segment from source shape by boolean intersection with a cutting box
       seg = extractSegmentFromSource(oc, sourceShape, axis, boundaries[i], boundaries[i + 1], width, length, thickness);
       if (!seg) {
-        // Fallback to fresh box if extraction fails
         seg = createSegmentBox(oc, segLen, crossWidth, thickness, axis);
       }
     } else {
@@ -129,47 +130,39 @@ function buildSingleAxisFold(
     }
 
     if (i > 0) {
-      // Translate segment to pen position, then rotate around bend axis
-      const tTranslate = new oc.gp_Trsf_1();
-      const transVec = axis === 'X'
-        ? new oc.gp_Vec_4(0, penPrimary, penZ)
-        : new oc.gp_Vec_4(penPrimary, 0, penZ);
-      tTranslate.SetTranslation_1(transVec);
-      transVec.delete();
+      const gc = new DisposableCollector();
+      try {
+        const tTranslate = gc.track(new oc.gp_Trsf_1());
+        const transVec = axis === 'X'
+          ? gc.track(new oc.gp_Vec_4(0, penPrimary, penZ))
+          : gc.track(new oc.gp_Vec_4(penPrimary, 0, penZ));
+        tTranslate.SetTranslation_1(transVec);
 
-      const tRotate = new oc.gp_Trsf_1();
-      if (cumulativeAngle !== 0) {
-        const rotPnt = axis === 'X'
-          ? new oc.gp_Pnt_3(0, penPrimary, penZ)
-          : new oc.gp_Pnt_3(penPrimary, 0, penZ);
-        const rotDir = axis === 'X'
-          ? new oc.gp_Dir_4(1, 0, 0)
-          : new oc.gp_Dir_4(0, 1, 0);
-        const rotAxis = new oc.gp_Ax1_2(rotPnt, rotDir);
-        tRotate.SetRotation_1(rotAxis, cumulativeAngle);
-        rotAxis.delete();
-        rotPnt.delete();
-        rotDir.delete();
+        const tRotate = gc.track(new oc.gp_Trsf_1());
+        if (cumulativeAngle !== 0) {
+          const rotPnt = axis === 'X'
+            ? gc.track(new oc.gp_Pnt_3(0, penPrimary, penZ))
+            : gc.track(new oc.gp_Pnt_3(penPrimary, 0, penZ));
+          const rotDir = axis === 'X'
+            ? gc.track(new oc.gp_Dir_4(1, 0, 0))
+            : gc.track(new oc.gp_Dir_4(0, 1, 0));
+          const rotAxis = gc.track(new oc.gp_Ax1_2(rotPnt, rotDir));
+          tRotate.SetRotation_1(rotAxis, cumulativeAngle);
+        }
+
+        const combined = gc.track(new oc.gp_Trsf_1());
+        if (cumulativeAngle !== 0) {
+          combined.Multiply(tRotate);
+          combined.Multiply(tTranslate);
+        } else {
+          combined.Multiply(tTranslate);
+        }
+
+        const xform = gc.track(new oc.BRepBuilderAPI_Transform_2(seg, combined, true));
+        seg = xform.Shape();
+      } finally {
+        gc.cleanup();
       }
-
-      const combined = new oc.gp_Trsf_1();
-      if (cumulativeAngle !== 0) {
-        combined.Multiply(tRotate);
-        combined.Multiply(tTranslate);
-      } else {
-        combined.Multiply(tTranslate);
-      }
-
-      const xform = new oc.BRepBuilderAPI_Transform_2(seg, combined, true);
-      seg = xform.Shape();
-      xform.delete();
-      tTranslate.delete();
-      tRotate.delete();
-      combined.delete();
-    } else if (sourceShape) {
-      // First segment from source needs to be repositioned to origin
-      // (it's already at its original position in the flat plate)
-      // No transform needed for the first segment — it stays in place
     }
 
     segments.push(seg);
@@ -211,13 +204,15 @@ function buildSingleAxisFold(
     let result = segments[0];
     for (let i = 1; i < segments.length; i++) {
       const fuse = new oc.BRepAlgoAPI_Fuse_3(result, segments[i]);
-      if (fuse.IsDone()) {
-        result = fuse.Shape();
-      } else {
-        fuse.delete();
-        return buildCompound(oc, segments);
+      try {
+        if (fuse.IsDone()) {
+          result = fuse.Shape();
+        } else {
+          return buildCompound(oc, segments);
+        }
+      } finally {
+        try { fuse.delete(); } catch {}
       }
-      fuse.delete();
     }
     return result;
   } catch {
@@ -242,15 +237,15 @@ function createSegmentBox(
     segL = crossWidth;
   }
   const maker = new oc.BRepPrimAPI_MakeBox_1(segW, segL, thickness);
-  const shape = maker.Shape();
-  maker.delete();
-  return shape;
+  try {
+    return maker.Shape();
+  } finally {
+    try { maker.delete(); } catch {}
+  }
 }
 
 /**
  * Extract a segment from the source shape by boolean intersection with a cutting box.
- * The cutting box spans the segment's position range along the bend axis,
- * with extra margin in the cross direction and Z to ensure full coverage.
  */
 function extractSegmentFromSource(
   oc: OpenCascadeInstance,
@@ -268,13 +263,11 @@ function extractSegmentFromSource(
     let offX: number, offY: number;
 
     if (axis === 'X') {
-      // Bend runs along X, position is along Y
       cutterW = plateWidth + margin * 2;
       cutterL = posEnd - posStart + margin * 2;
       offX = -margin;
       offY = posStart - margin;
     } else {
-      // Bend runs along Y, position is along X
       cutterW = posEnd - posStart + margin * 2;
       cutterL = plateLength + margin * 2;
       offX = posStart - margin;
@@ -282,35 +275,38 @@ function extractSegmentFromSource(
     }
 
     const cutterMaker = new oc.BRepPrimAPI_MakeBox_1(cutterW, cutterL, thickness + margin * 2);
-    const cutter = cutterMaker.Shape();
-    cutterMaker.delete();
+    let cutter: any;
+    try {
+      cutter = cutterMaker.Shape();
+    } finally {
+      try { cutterMaker.delete(); } catch {}
+    }
 
     // Position the cutter
     const positioned = translateShape(oc, cutter, offX, offY, -margin);
-    cutter.delete();
+    try { cutter.delete(); } catch {}
 
     // Boolean intersect to extract the segment
     const segment = booleanIntersect(oc, sourceShape, positioned);
-    positioned.delete();
+    try { positioned.delete(); } catch {}
 
-    // Translate segment back to origin (subtract posStart offset)
+    // Translate segment back to origin
     if (axis === 'X') {
       const result = translateShape(oc, segment, 0, -posStart, 0);
-      segment.delete();
+      try { segment.delete(); } catch {}
       return result;
     } else {
       const result = translateShape(oc, segment, -posStart, 0, 0);
-      segment.delete();
+      try { segment.delete(); } catch {}
       return result;
     }
   } catch {
-    return null; // Extraction failed — caller will use fresh box
+    return null;
   }
 }
 
 /**
  * Create a cylindrical bend zone at a bend position.
- * Creates a rectangular cross-section and revolves it around the bend axis.
  */
 function createBendZone(
   oc: OpenCascadeInstance,
@@ -319,94 +315,75 @@ function createBendZone(
   thickness: number,
   bendRadius: number,
   bendAngleRad: number,
-  sign: number, // +1 up, -1 down
+  sign: number,
   penPrimary: number,
   penZ: number,
   cumulativeAngle: number
 ): any | null {
+  const gc = new DisposableCollector();
   try {
-    // The bend zone is a revolved rectangle.
-    // Cross-section: thickness (radial) × crossWidth (along bend axis)
-    // Revolve around the bend center by the bend angle.
-
-    // Create rectangular cross-section at origin (in the plane of rotation)
-    // For axis='X': rotation is in Y-Z plane, cross-section in X-Z at the bend point
-    // For axis='Y': rotation is in X-Z plane, cross-section in Y-Z at the bend point
-
-    // The cross-section rectangle spans:
-    //   - radial direction: from bendRadius to bendRadius + thickness
-    //   - axis direction: 0 to crossWidth
-
     let p1: any, p2: any, p3: any, p4: any;
 
     if (axis === 'X') {
-      // Cross-section in X-Z plane at Y=0 (will be positioned later)
-      // X spans [0, crossWidth], Z spans [bendRadius, bendRadius + thickness]
-      p1 = new oc.gp_Pnt_3(0, 0, sign * bendRadius);
-      p2 = new oc.gp_Pnt_3(crossWidth, 0, sign * bendRadius);
-      p3 = new oc.gp_Pnt_3(crossWidth, 0, sign * (bendRadius + thickness));
-      p4 = new oc.gp_Pnt_3(0, 0, sign * (bendRadius + thickness));
+      p1 = gc.track(new oc.gp_Pnt_3(0, 0, sign * bendRadius));
+      p2 = gc.track(new oc.gp_Pnt_3(crossWidth, 0, sign * bendRadius));
+      p3 = gc.track(new oc.gp_Pnt_3(crossWidth, 0, sign * (bendRadius + thickness)));
+      p4 = gc.track(new oc.gp_Pnt_3(0, 0, sign * (bendRadius + thickness)));
     } else {
-      // Cross-section in Y-Z plane at X=0
-      p1 = new oc.gp_Pnt_3(0, 0, sign * bendRadius);
-      p2 = new oc.gp_Pnt_3(0, crossWidth, sign * bendRadius);
-      p3 = new oc.gp_Pnt_3(0, crossWidth, sign * (bendRadius + thickness));
-      p4 = new oc.gp_Pnt_3(0, 0, sign * (bendRadius + thickness));
+      p1 = gc.track(new oc.gp_Pnt_3(0, 0, sign * bendRadius));
+      p2 = gc.track(new oc.gp_Pnt_3(0, crossWidth, sign * bendRadius));
+      p3 = gc.track(new oc.gp_Pnt_3(0, crossWidth, sign * (bendRadius + thickness)));
+      p4 = gc.track(new oc.gp_Pnt_3(0, 0, sign * (bendRadius + thickness)));
     }
 
     // Build wire from 4 edges
-    const e1 = new oc.BRepBuilderAPI_MakeEdge_3(p1, p2);
-    const e2 = new oc.BRepBuilderAPI_MakeEdge_3(p2, p3);
-    const e3 = new oc.BRepBuilderAPI_MakeEdge_3(p3, p4);
-    const e4 = new oc.BRepBuilderAPI_MakeEdge_3(p4, p1);
+    const e1 = gc.track(new oc.BRepBuilderAPI_MakeEdge_3(p1, p2));
+    const e2 = gc.track(new oc.BRepBuilderAPI_MakeEdge_3(p2, p3));
+    const e3 = gc.track(new oc.BRepBuilderAPI_MakeEdge_3(p3, p4));
+    const e4 = gc.track(new oc.BRepBuilderAPI_MakeEdge_3(p4, p1));
 
-    const wireBuilder = new oc.BRepBuilderAPI_MakeWire_1();
+    const wireBuilder = gc.track(new oc.BRepBuilderAPI_MakeWire_1());
     wireBuilder.Add_1(e1.Edge());
     wireBuilder.Add_1(e2.Edge());
     wireBuilder.Add_1(e3.Edge());
     wireBuilder.Add_1(e4.Edge());
     const wire = wireBuilder.Wire();
 
-    const faceMaker = new oc.BRepBuilderAPI_MakeFace_15(wire, true);
+    const faceMaker = gc.track(new oc.BRepBuilderAPI_MakeFace_15(wire, true));
     const face = faceMaker.Shape();
 
-    // Revolve axis: at the bend center (pen position), along the bend axis direction
+    // Revolve axis
     const revolPnt = axis === 'X'
-      ? new oc.gp_Pnt_3(0, 0, 0)
-      : new oc.gp_Pnt_3(0, 0, 0);
+      ? gc.track(new oc.gp_Pnt_3(0, 0, 0))
+      : gc.track(new oc.gp_Pnt_3(0, 0, 0));
     const revolDir = axis === 'X'
-      ? new oc.gp_Dir_4(1, 0, 0)
-      : new oc.gp_Dir_4(0, 1, 0);
-    const revolAxis = new oc.gp_Ax1_2(revolPnt, revolDir);
+      ? gc.track(new oc.gp_Dir_4(1, 0, 0))
+      : gc.track(new oc.gp_Dir_4(0, 1, 0));
+    const revolAxis = gc.track(new oc.gp_Ax1_2(revolPnt, revolDir));
 
-    // Revolve by the bend angle
-    const revol = new oc.BRepPrimAPI_MakeRevol_1(face, revolAxis, bendAngleRad, true);
+    const revol = gc.track(new oc.BRepPrimAPI_MakeRevol_1(face, revolAxis, bendAngleRad, true));
     let bendShape = revol.Shape();
 
     // Translate to pen position and rotate by cumulative angle
-    const tTranslate = new oc.gp_Trsf_1();
+    const tTranslate = gc.track(new oc.gp_Trsf_1());
     const transVec = axis === 'X'
-      ? new oc.gp_Vec_4(0, penPrimary, penZ)
-      : new oc.gp_Vec_4(penPrimary, 0, penZ);
+      ? gc.track(new oc.gp_Vec_4(0, penPrimary, penZ))
+      : gc.track(new oc.gp_Vec_4(penPrimary, 0, penZ));
     tTranslate.SetTranslation_1(transVec);
-    transVec.delete();
 
-    const tRotate = new oc.gp_Trsf_1();
+    const tRotate = gc.track(new oc.gp_Trsf_1());
     if (cumulativeAngle !== 0) {
       const rotPnt = axis === 'X'
-        ? new oc.gp_Pnt_3(0, penPrimary, penZ)
-        : new oc.gp_Pnt_3(penPrimary, 0, penZ);
+        ? gc.track(new oc.gp_Pnt_3(0, penPrimary, penZ))
+        : gc.track(new oc.gp_Pnt_3(penPrimary, 0, penZ));
       const rotDir2 = axis === 'X'
-        ? new oc.gp_Dir_4(1, 0, 0)
-        : new oc.gp_Dir_4(0, 1, 0);
-      const rotAx = new oc.gp_Ax1_2(rotPnt, rotDir2);
+        ? gc.track(new oc.gp_Dir_4(1, 0, 0))
+        : gc.track(new oc.gp_Dir_4(0, 1, 0));
+      const rotAx = gc.track(new oc.gp_Ax1_2(rotPnt, rotDir2));
       tRotate.SetRotation_1(rotAx, cumulativeAngle);
-      rotAx.delete();
-      rotPnt.delete();
-      rotDir2.delete();
     }
 
-    const combined = new oc.gp_Trsf_1();
+    const combined = gc.track(new oc.gp_Trsf_1());
     if (cumulativeAngle !== 0) {
       combined.Multiply(tRotate);
       combined.Multiply(tTranslate);
@@ -414,27 +391,18 @@ function createBendZone(
       combined.Multiply(tTranslate);
     }
 
-    const xform = new oc.BRepBuilderAPI_Transform_2(bendShape, combined, true);
+    const xform = gc.track(new oc.BRepBuilderAPI_Transform_2(bendShape, combined, true));
     bendShape = xform.Shape();
 
-    // Cleanup
-    xform.delete();
-    tTranslate.delete();
-    tRotate.delete();
-    combined.delete();
-    revol.delete();
-    revolAxis.delete();
-    revolPnt.delete();
-    revolDir.delete();
-    faceMaker.delete();
-    wire.delete();
-    wireBuilder.delete();
-    e1.delete(); e2.delete(); e3.delete(); e4.delete();
-    p1.delete(); p2.delete(); p3.delete(); p4.delete();
+    // Clean up intermediate shapes not tracked by gc
+    try { wire.delete(); } catch {}
+    try { face.delete(); } catch {}
 
     return bendShape;
   } catch {
     return null;
+  } finally {
+    gc.cleanup();
   }
 }
 
