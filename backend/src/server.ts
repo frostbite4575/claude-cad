@@ -13,7 +13,7 @@ import { exportStl } from './geometry/stl-export.js';
 import { parseDxf, dxfToShapes } from './geometry/dxf-import.js';
 import { importStep } from './geometry/step-import.js';
 import { saveProject, loadProject } from './state/project-io.js';
-import { executeTool } from './ai/tools/index.js';
+import { executeTool, getCategorizedToolDefs } from './ai/tools/index.js';
 import type { WSMessage, MeshUpdatePayload, ChatMessagePayload, EntitySelectedPayload, ToolExecutePayload } from '../../shared/index.js';
 
 const PORT = 3000;
@@ -41,6 +41,11 @@ app.use(express.text({ limit: '10mb', type: 'text/plain' }));
 // Health check
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok' });
+});
+
+// Tool definitions for the frontend tool panel
+app.get('/api/tool-defs', (_req, res) => {
+  res.json({ categories: getCategorizedToolDefs() });
 });
 
 // DXF export
@@ -386,11 +391,13 @@ wss.on('connection', (ws: WebSocket) => {
         console.log(`Manual tool: ${tool}`, input);
         undoManager.captureSnapshot(docState, `${tool}(manual)`);
         try {
-          executeTool(docState, tool, input as Record<string, any>, undoManager);
+          const result = executeTool(docState, tool, input as Record<string, any>, undoManager);
+          sendWS({ type: 'tool_result', payload: { tool, result } });
           const meshes = docState.tessellateAll();
           sendWS({ type: 'mesh_update', payload: { meshes } satisfies MeshUpdatePayload });
         } catch (err: any) {
           console.error('Tool execute error:', err);
+          sendWS({ type: 'tool_result', payload: { tool, result: JSON.stringify({ success: false, error: err.message }) } });
           sendWS({ type: 'error', payload: { message: err.message || 'Tool execution failed' } });
         }
       } else if (msg.type === 'clear_conversation') {

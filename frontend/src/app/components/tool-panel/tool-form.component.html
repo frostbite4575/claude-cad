@@ -1,0 +1,77 @@
+<form [formGroup]="form" (ngSubmit)="submit()" class="tool-form">
+  @for (field of fields; track field.key) {
+    <div class="form-field">
+      <label [for]="field.key">
+        {{ field.label }}
+        @if (field.required) { <span class="required">*</span> }
+      </label>
+
+      @switch (field.widget) {
+        @case ('number') {
+          <input
+            type="number"
+            [id]="field.key"
+            [formControlName]="field.key"
+            [placeholder]="field.description"
+            step="any"
+          />
+        }
+        @case ('text') {
+          <input
+            type="text"
+            [id]="field.key"
+            [formControlName]="field.key"
+            [placeholder]="field.description"
+          />
+        }
+        @case ('select') {
+          <select [id]="field.key" [formControlName]="field.key">
+            <option value="">-- select --</option>
+            @for (opt of field.options; track opt) {
+              <option [value]="opt">{{ opt }}</option>
+            }
+          </select>
+        }
+        @case ('checkbox') {
+          <input
+            type="checkbox"
+            [id]="field.key"
+            [formControlName]="field.key"
+          />
+        }
+        @case ('points') {
+          <textarea
+            [id]="field.key"
+            [formControlName]="field.key"
+            placeholder="One x,y per line&#10;e.g. 0,0&#10;1,0&#10;1,1"
+            rows="4"
+          ></textarea>
+        }
+        @case ('number-array') {
+          <input
+            type="text"
+            [id]="field.key"
+            [formControlName]="field.key"
+            [placeholder]="'Comma-separated numbers, e.g. 0,1,4'"
+          />
+        }
+        @case ('string-array') {
+          <input
+            type="text"
+            [id]="field.key"
+            [formControlName]="field.key"
+            [placeholder]="'Comma-separated IDs, e.g. shape_1,shape_2'"
+          />
+        }
+      }
+
+      @if (field.description && field.widget !== 'number' && field.widget !== 'text') {
+        <span class="field-hint">{{ field.description }}</span>
+      }
+    </div>
+  }
+
+  <button type="submit" class="execute-btn" [disabled]="form.invalid">
+    Execute
+  </button>
+</form>

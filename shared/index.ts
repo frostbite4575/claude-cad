@@ -16,6 +16,7 @@ export type WSMessageType =
   | 'chat_message'
   | 'chat_response'
   | 'chat_tool_use'
+  | 'tool_result'
   | 'scene_info'
   | 'undo'
   | 'redo'
@@ -62,6 +63,11 @@ export interface EntitySelectedPayload {
 export interface ToolExecutePayload {
   tool: string;
   input: Record<string, unknown>;
+}
+
+export interface ToolResultPayload {
+  tool: string;
+  result: string;
 }
 
 export interface EntityInfo {

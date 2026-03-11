@@ -1,0 +1,70 @@
+<div class="panel-header">
+  @if (selectedTool) {
+    <button class="back-btn" (click)="goBack()" title="Back to tool list">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <path d="M10 3L5 8l5 5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+    <span class="header-title">{{ formatName(selectedTool.name) }}</span>
+  } @else {
+    <span class="header-title">Tools ({{ totalTools }})</span>
+  }
+</div>
+
+@if (selectedTool) {
+  <!-- Tool form view -->
+  <div class="tool-detail">
+    <p class="tool-desc">{{ selectedTool.description }}</p>
+
+    @if (resultMessage) {
+      <div class="result-msg" [class.error]="!resultSuccess" [class.success]="resultSuccess">
+        {{ resultMessage }}
+      </div>
+    }
+
+    <app-tool-form
+      [tool]="selectedTool"
+      (execute)="onExecute($event)"
+    />
+  </div>
+} @else {
+  <!-- Category / search view -->
+  <div class="search-box">
+    <input
+      type="text"
+      [(ngModel)]="searchQuery"
+      (ngModelChange)="onSearchChange()"
+      placeholder="Search tools..."
+    />
+  </div>
+
+  <div class="category-list">
+    @for (cat of filteredCategories; track cat.name) {
+      <div class="category">
+        <button class="category-header" (click)="toggleCategory(cat.name)">
+          <span class="chevron" [class.expanded]="expandedCategory === cat.name">
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+              <path d="M3 1l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </span>
+          <span class="cat-name">{{ cat.name }}</span>
+          <span class="cat-count">{{ cat.tools.length }}</span>
+        </button>
+
+        @if (expandedCategory === cat.name) {
+          <div class="category-tools">
+            @for (tool of cat.tools; track tool.name) {
+              <button class="tool-item" (click)="selectTool(tool)" [title]="tool.description">
+                {{ formatName(tool.name) }}
+              </button>
+            }
+          </div>
+        }
+      </div>
+    }
+
+    @if (filteredCategories.length === 0 && searchQuery) {
+      <div class="no-results">No tools match "{{ searchQuery }}"</div>
+    }
+  </div>
+}

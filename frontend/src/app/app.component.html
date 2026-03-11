@@ -1,3 +1,6 @@
-<app-toolbar></app-toolbar>
+<app-toolbar [toolPanelOpen]="toolPanelOpen" (toggleToolPanel)="toolPanelOpen = !toolPanelOpen"></app-toolbar>
+@if (toolPanelOpen) {
+  <app-tool-panel></app-tool-panel>
+}
 <app-viewport></app-viewport>
 <app-chat-panel></app-chat-panel>

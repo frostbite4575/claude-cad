@@ -31,6 +31,24 @@ export const cadTools: Tool[] = [
   ...templateToolDefs,
 ];
 
+/** Categorized tool definitions for the frontend tool panel */
+export function getCategorizedToolDefs() {
+  return [
+    { name: 'Primitives', tools: primitiveToolDefs },
+    { name: 'Sketches', tools: sketchToolDefs },
+    { name: 'Modeling', tools: modelingToolDefs },
+    { name: 'Booleans', tools: booleanToolDefs },
+    { name: 'Transforms', tools: transformToolDefs },
+    { name: 'Cuts', tools: cutToolDefs },
+    { name: 'Sheet Metal', tools: sheetMetalToolDefs },
+    { name: 'Measurement', tools: measurementToolDefs },
+    { name: 'Materials', tools: materialToolDefs },
+    { name: 'Scene', tools: sceneToolDefs },
+    { name: 'Export / Import', tools: exportImportToolDefs },
+    { name: 'Templates', tools: templateToolDefs },
+  ];
+}
+
 /** Dispatch a tool call to the appropriate module */
 export function executeTool(
   state: DocumentState,

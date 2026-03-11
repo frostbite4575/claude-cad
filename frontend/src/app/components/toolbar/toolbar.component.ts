@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit } from '@angular/core';
+import { Component, EventEmitter, Input, OnDestroy, OnInit, Output } from '@angular/core';
 import { NgClass } from '@angular/common';
 import { Subscription } from 'rxjs';
 import { DrawingToolService, DrawingTool, SketchPlane } from '../../services/drawing-tool.service';
@@ -12,6 +12,9 @@ import { SelectionService } from '../../services/selection.service';
   styleUrl: './toolbar.component.scss'
 })
 export class ToolbarComponent implements OnInit, OnDestroy {
+  @Input() toolPanelOpen = false;
+  @Output() toggleToolPanel = new EventEmitter<void>();
+
   activeTool: DrawingTool | null = null;
   hasSelection = false;
   sketchPlane: SketchPlane = 'XY';

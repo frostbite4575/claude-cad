@@ -2,6 +2,15 @@
 
 <div class="separator"></div>
 
+<!-- Tool Panel Toggle -->
+<button class="toolbar-btn" title="Tool Panel (T)" [ngClass]="{ active: toolPanelOpen }" (click)="toggleToolPanel.emit()">
+  <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M11.5 2.5L9 5l1.5 1.5-5 5L4 10l-2.5 2.5 6 6L10 16l-1.5-1.5 5-5L15 11l2.5-2.5-6-6z" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </svg>
+</button>
+
+<div class="separator"></div>
+
 <!-- File operations -->
 <button class="toolbar-btn" title="Save Project (Ctrl+S)" (click)="saveProject()">
   <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
